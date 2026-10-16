@@ -1,243 +1,266 @@
-# SunnyFit BLE CLI
+<div align="center">
 
-A Rust application for Debian/Linux that connects to a **Sunny Health & Fitness
-SF-B023005DGY mini bike**, records its Bluetooth data, runs a live terminal workout,
-and publishes JSON events to Redis.
+<img src="assets/sunnyfit_banner.png" width="1100" alt="SunnyFit / Desk Ride — Bluetooth telemetry, Rust, Linux and Redis. A THUGS(red) project." />
 
-The proprietary startup and telemetry were exercised on a physical bike. Its
-Android app's protocol code was inspected to establish field meanings and units.
-Speed, cadence, distance, device time, calories, odometer and operating status are
-decoded. Calories are the bike's estimate. Power, heart rate, resistance and battery
-remain unavailable unless a supported source actually supplies them. See
-[protocol and evidence](docs/PROTOCOL.md) and [validation](VALIDATION.md).
+**Turn a desk ride into a live terminal workout.**
 
-## Build and install
+Connect your SunnyFit mini bike. Watch your cadence. Keep a workout history.
+Send live telemetry to Redis and build your own dashboards around it.
 
-Rust 1.90+ is required. This host was built using Rust 1.94.1 on Debian 13.
+[![APT](https://img.shields.io/badge/INSTALL-APT-00d9c0?style=for-the-badge)](https://apt.thugs.red)
+![Rust](https://img.shields.io/badge/RUST-1.90%2B-11151d?style=for-the-badge&logo=rust&logoColor=white)
+![Linux](https://img.shields.io/badge/LINUX-BLUEZ-11151d?style=for-the-badge&logo=linux&logoColor=white)
+![Redis](https://img.shields.io/badge/REDIS-PUB%2FSUB-dc382d?style=for-the-badge&logo=redis&logoColor=white)
+[![License](https://img.shields.io/badge/LICENSE-MIT-00d9c0?style=for-the-badge)](LICENSE)
+
+<samp>Rust · Bluetooth LE · Ratatui · JSON · Debian</samp>
+
+[**THUGS(red)**](https://thugs.red) · [**Install from APT**](https://apt.thugs.red) · [**CLI reference**](docs/USAGE.md) · [**Report an issue**](https://github.com/kawaiipantsu/sunnyfit-ble-cli/issues/new/choose)
+
+</div>
+
+## Contents
+
+- [The ride](#the-ride)
+- [Inside the terminal](#inside-the-terminal)
+- [Install and connect](#install-and-connect)
+- [Your data, your tools](#your-data-your-tools)
+- [Configuration and history](#configuration-and-history)
+- [Architecture](#architecture)
+- [Build from source](#build-from-source)
+- [Compatibility and verification](#compatibility-and-verification)
+- [Documentation](#documentation)
+- [Contribute](#contribute)
+- [License](#license)
+
+## The ride
+
+| Area | What it does |
+| --- | --- |
+| **Bluetooth** | Discovers BLE devices, remembers your bike, supports explicit pairing and forgetting, and reconnects with a fresh startup handshake. |
+| **Workout** | Live speed, cadence, distance, elapsed and active time, estimated calories, cadence graph, activity goal and encouragement. Pause local totals, mark a moment, or save and quit. |
+| **Telemetry** | Decodes the SF-B023005DGY's Sunny protocol, including fragmented packets, operating status and odometer. Standard FTMS and CSC decoders are also included. |
+| **History** | Saves raw events, decoded measurements and workout summaries locally. Replay recordings without the bike. |
+| **Redis** | Separate, configurable raw, metrics, status and workout channels for downstream dashboards and WebSocket applications. |
+| **Headless operation** | Quiet capture by default, simple debug feedback on request, or line-by-line raw JSON with `--debug-stdout -v`. |
+| **Debian** | Makefile builds, a `.deb` package, and an optional systemd user service. Packages are distributed through [apt.thugs.red](https://apt.thugs.red). |
+
+## Inside the terminal
+
+![SunnyFit workout TUI showing speed, cadence, distance, estimated calories, a cadence graph and an activity goal in demo mode](assets/screenshots/workout-demo.png)
+
+Captured from the actual executable in **demo mode**, with simulated measurements
+and a one-minute activity goal. The banner above was supplied by the project owner.
+
+| Key | Action |
+| --- | --- |
+| `space` / `p` | Pause or resume local workout totals |
+| `m` | Add a marker to the recording |
+| `q` / `Esc` / `Ctrl-C` | Save and exit |
+
+Try the screen without a bike:
 
 ```sh
-sudo apt-get install build-essential pkg-config libdbus-1-dev bluez firmware-realtek dpkg-dev python3 redis-server redis-tools
-sudo systemctl start bluetooth
-make                 # list targets
-make build
-make check           # format, Clippy, unit and isolated integration tests
-make deb             # optimized executable and dist/*.deb
-sudo apt install ./dist/sunnyfit-ble-cli_0.2.0-1_amd64.deb
+sunnyfit-ble-cli --demo --workout --met 3
 ```
 
-The Realtek USB adapter already uses the kernel's `btusb`/`btrtl` drivers. The
-missing `rtl_bt/rtl8761bu_fw.bin` is supplied by Debian's `firmware-realtek` package
-in `non-free-firmware`. Replug that adapter after installation. You do not need
-an out-of-tree driver. `make deps` installs prerequisites when run as root.
+The TUI renders to stderr; stdout remains available for JSON. Missing or stale
+measurements appear as unavailable. Calories are labelled as estimates.
 
-`make release FEATURES=vendored-dbus` builds the D-Bus client library from source.
-A running BlueZ/system D-Bus service is still required. Ordinary operation uses
-the host's existing Bluetooth permissions; the program does not change system
-D-Bus policies. `make install PREFIX=/usr/local` supports `DESTDIR` staging.
+## Install and connect
 
-## Connect and ride
-
-Wake the bike and disconnect the phone's SunnyFit connection first.
+Configure the THUGS(red) repository using its [APT setup instructions](https://apt.thugs.red/help), then:
 
 ```sh
+sudo apt update
+sudo apt install sunnyfit-ble-cli
 sunnyfit-ble-cli doctor
+```
+
+Debian packages are delivered through APT rather than GitHub Releases. The current
+build targets Debian 13; build from source on an older distribution if needed.
+
+Wake the bike with a few pedal turns and disconnect the phone's SunnyFit app.
+Scan, then use the address reported for your bike:
+
+```sh
 sunnyfit-ble-cli --adapter hci1 --seconds 20 scan
 sunnyfit-ble-cli --adapter hci1 connect AA:BB:CC:DD:EE:FF
 sunnyfit-ble-cli --workout
 ```
 
-Use the address found by `scan`. `connect` verifies the GATT connection and saves
-only the device/adapter selection. It disconnects its own setup connection when
-finished; subsequent captures reconnect automatically. Never select a device by
-name alone. Address changes require selecting the bike again.
+Choose the adapter shown by `doctor`; `hci1` is an example. `connect` verifies GATT
+access and saves the bike and adapter for subsequent runs.
 
-`pair ADDRESS` explicitly attempts Bluetooth bonding with a Just Works agent.
-**The tested mini bike rejected bonding with `AuthenticationFailed`; it streams
-successfully over an unbonded GATT connection. Use `connect` for this model.**
-For PIN/passkey devices use `bluetoothctl`'s interactive agent.
-
-The built-in startup activates only after reading the exact SF-B023005DGY model
-identifier. It authenticates the Sunny application protocol, queries metadata,
-starts reporting with the app's non-clearing flag, and acknowledges status.
-`--sunny-protocol=false` disables all automatic application writes. It never
-sets resistance, sends OTA commands, or resets counters intentionally.
+**The tested SF-B023005DGY streams without a Bluetooth bond.** It rejected native
+pairing with `AuthenticationFailed`, so use `connect` for this model. The `pair`
+command remains available for devices that support bonding.
 
 ```sh
 sunnyfit-ble-cli disconnect
-sunnyfit-ble-cli forget             # remove BlueZ bond/cache and saved selection
-sunnyfit-ble-cli --debug-stdout -v inspect
+sunnyfit-ble-cli forget
 sunnyfit-ble-cli --seconds 120 capture
-sunnyfit-ble-cli --demo --workout --met 3
+sunnyfit-ble-cli history
 ```
 
-The workout screen shows speed, cadence, workout distance/energy, wall and active
-time, a cadence trace and an active-time goal. `space`/`p` pauses local totals,
-`m` records a marker, and `q` saves and exits. Pausing local totals does not control
-the bike. Ctrl-C/SIGTERM saves and closes the connection. The TUI uses **stderr**,
-so JSON stdout can be redirected separately. `--demo` clearly labels simulated
-input and never opens Bluetooth.
+<details>
+<summary>Realtek USB adapter reports missing rtl8761bu_fw.bin</summary>
 
-## Configuration and history
-
-Every invocation, including `--help`, creates a private default config if absent:
-
-```text
-~/.config/sunnyfit-ble-cli/config.toml
-~/.config/sunnyfit-ble-cli/past-workouts/<timestamp>-<run-id>/
-    manifest.json
-    events.jsonl
-    summary.json
-```
-
-`XDG_CONFIG_HOME` is respected. `--config PATH` loads another config; the default
-is still created. Unknown configuration keys and invalid values are rejected.
-Each setting has a corresponding command-line option; options override only the
-individual setting for that invocation. `connect`, `pair`, and `forget` persist
-selection changes, without persisting transient CLI secrets.
-
-Example settings (all optional):
-
-```toml
-adapter = "hci1"
-device = "AA:BB:CC:DD:EE:FF"
-sunny_protocol = true
-pair = false
-reconnect = true
-timeout_seconds = 20
-reconnect_max_seconds = 30
-stale_seconds = 5
-poll_seconds = 0
-goal_minutes = 20
-target_cadence = 60.0
-weight_kg = 75.0
-redis_enabled = true
-raw_channel = "sunny:bike:raw"
-metrics_channel = "sunny:bike:metrics"
-status_channel = "sunny:bike:status"
-workout_channel = "sunny:bike:workout"
-redis_queue = 512
-debug_stdout = false
-verbose = false
-init_command = []
-```
-
-Optional `redis_url`, `output_dir`, `wheel_circumference_m`, `meters_per_crank`, and
-`met` can also be set in TOML or through their hyphenated CLI options. `met` is an
-explicit user assumption for calorie estimation when the device supplies none.
-No default gearing or exercise intensity is invented. Standard FTMS and CSC
-sources are also decoded; CSC speed needs wheel circumference or a calibrated
-metres-per-crank value. The mini bike supplies its own speed/cadence and does not
-need calibration for those fields.
-
-Boolean overrides accept `--reconnect=false`, `--redis-enabled=false`, and so on.
-`--seconds` bounds the entire operation including setup and reconnects. A silent
-but connected device is marked stale after the configured interval; silence
-alone does not trigger reconnect or fabricate zero readings.
+The kernel already supplies the `btusb` / `btrtl` drivers. On Debian, enable the
+`non-free-firmware` repository component and install the firmware:
 
 ```sh
-sunnyfit-ble-cli history
-sunnyfit-ble-cli replay /path/to/events.jsonl
+sudo apt install bluez firmware-realtek
+sudo systemctl start bluetooth
 ```
 
-Local history contains personal exercise data and BLE identifiers. New capture
-directories are mode 0700 and files 0600. Captures, ZIPs, app analysis artifacts,
-private configuration, and Debian packages are excluded from Git.
+Replug the USB adapter, then run `sunnyfit-ble-cli doctor`. An out-of-tree driver
+is not required for the tested RTL8761BU adapter.
 
-## Output and Redis
+</details>
 
-| Invocation | Stdout |
+## Your data, your tools
+
+| Flags | Capture stdout |
 | --- | --- |
-| Default capture | Quiet |
-| `--debug-stdout` | Simple JSON lifecycle/summary messages |
+| None | Quiet |
+| `--debug-stdout` | Simple lifecycle and summary JSON |
 | `-v` alone | Quiet |
-| `-v --debug-stdout` | Every raw event and decoded/derived event, one JSON object per line |
-| `scan`, `history`, `replay` | Their requested JSON results |
+| `--debug-stdout -v` | Raw and decoded events, one JSON object per line |
 
-Raw events retain original packet boundaries, bytes, source UUIDs and instance
-IDs. Each event has a run ID, sequence, connection epoch where applicable,
-wall-clock processing time, and monotonic observed/processed times. Decoded Sunny
-frames include the source-event IDs for every fragment, full frame bytes, all
-TLVs (including unknown tags), and interpretation provenance.
+```sh
+sunnyfit-ble-cli --debug-stdout -v capture > ride.jsonl
+sunnyfit-ble-cli replay /path/to/past-workouts/run/events.jsonl
+```
 
-Prefer the environment or a private config for credential-bearing URLs:
+For Redis, set a private configuration value or an environment variable:
 
 ```sh
 export SUNNY_REDIS_URL=redis://127.0.0.1:6379/
 sunnyfit-ble-cli --workout
+# In another terminal:
 redis-cli PSUBSCRIBE 'sunny:bike:*'
 ```
 
-| Default channel | Contents |
+| Default channel | Payload |
 | --- | --- |
-| `sunny:bike:raw` | Raw packets, reads, writes, metadata and acquisition outcomes |
+| `sunny:bike:raw` | Original packets, reads, writes and acquisition metadata |
 | `sunny:bike:metrics` | Decoded samples and periodic workout snapshots |
-| `sunny:bike:status` | Connection state, gaps, retries, markers and decoder errors |
-| `sunny:bike:workout` | End-of-session workout summary |
+| `sunny:bike:status` | Connection changes, gaps, retries and markers |
+| `sunny:bike:workout` | End-of-session summary |
 
-Channels are independently configurable. Redis connection attempts back off and
-recover. Its bounded queue cannot block BLE collection. Queue drops, failed or
-unconfirmed publications and pending messages are saved in the final local
-summary. A failed publish is not blindly retried because a timeout can occur
-after delivery. `replay` can republish saved data; deduplicate raw events by
-`run_id` and `sequence`, decoded events by run and source references. Pub/Sub has
-no persistent delivery guarantee. This build supports plain Redis transports;
-TLS is not enabled. Do not send credentials over an untrusted plaintext network.
+Local recording continues independently of Redis. Redis reconnects with backoff;
+queue drops and failed or unconfirmed deliveries are recorded. Pub/Sub is not a
+persistent queue. This build uses plain Redis transports without TLS support.
+See the [data and delivery details](docs/USAGE.md#output-and-redis).
 
-Local capture has a separate bounded writer queue (4096 events), flushes and
-`sync_data`s at least once per second while making progress, and syncs on clean
-shutdown. Writer failure/overload aborts capture and marks it partial when a
-summary can be written. A crash/disk failure may leave an `in_progress` manifest
-and lose a buffered tail. Stdout has a separate best-effort queue; its loss count
-is in the local summary. Slow stdout and Redis do not stop local recording.
+## Configuration and history
 
-## Acquisition, reconnects and research
+The first invocation creates a private default configuration and history directory,
+including when invoked with `--help`. `XDG_CONFIG_HOME` is respected.
 
-A reconnect starts a new epoch, re-discovers the exact selected address, recreates
-GATT objects/subscriptions and repeats the verified startup. Counter baselines
-reset at a new epoch so missing intervals are not invented as recorded distance.
-A device counter decrease also starts a new baseline. Historical odometer and
-device counters remain separate from this CLI workout's totals.
-
-All discovered characteristics/descriptors are inventoried and readable values
-are attempted. All telemetry notifications are subscribed; `AcquireNotify` is
-preferred to avoid the ordinary BlueR startup receiver gap. Indications use the
-fallback `StartNotify` path and are labelled `gatt_value_update`. GAP Device Name
-advertises notification support on this firmware but has no usable notification
-source; it is read instead. Failed discovery/read/subscription operations remain
-in the event log. Optional `--poll-seconds N` repeats readable values; it is off
-by default because this bike streams its workout data.
-
-BlueZ property snapshots are not raw radio advertisements. For packet-level
-controller evidence run alongside the CLI, before connecting:
-
-```sh
-sudo btmon -i hci1 -w /private/path/linux.btsnoop
+```text
+~/.config/sunnyfit-ble-cli/
+├── config.toml
+└── past-workouts/
+    └── <timestamp>-<run-id>/
+        ├── manifest.json
+        ├── events.jsonl
+        └── summary.json
 ```
 
-`--init-command UUID=HEX` (repeatable) replaces automatic startup for controlled
-protocol experiments and repeats on reconnect. Only use known commands: some
-Sunny commands reset counters or change device operation. Original writes and
-results are logged. No app/APK/decompiled source is redistributed by this project.
-
-## Background service and deployment
-
-The package includes an optional systemd **user** unit; installation does not
-enable it automatically. Configure the bike and Redis as the intended user, then:
+Each configuration setting has a CLI override. An override changes only that
+setting for the current invocation. Use `--config PATH` for an alternative file.
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now sunnyfit-ble-cli
+sunnyfit-ble-cli --workout --goal-minutes 25 --target-cadence 70
+sunnyfit-ble-cli --redis-enabled=false --seconds 60 capture
+sunnyfit-ble-cli config
 ```
 
-`make deploy` reads the external private deployment instructions and checks the
-configured API authentication and suites, without printing credentials or publishing. See [Debian deployment](docs/DEPLOYMENT.md). Git remains
-local with no remote configured; commits use the existing global identity.
+New capture directories use mode `0700`, and files use `0600`. Recordings contain
+exercise data and BLE identifiers; review and redact excerpts before sharing them.
+[Full configuration reference](docs/USAGE.md#configuration-and-history).
 
-## References
+## Architecture
 
-- [Debian firmware-realtek](https://packages.debian.org/trixie/firmware-realtek)
-- [Official SunnyFit Android listing](https://play.google.com/store/apps/details?id=com.amoyyg.sunny)
-- [BlueR 0.17.4](https://docs.rs/bluer/0.17.4/bluer/)
-- [Bluetooth CSC specification](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/CSCS_v1.0/out/en/index-en.html)
-- [Bluetooth Fitness Machine Service](https://www.bluetooth.com/specifications/specs/fitness-machine-service-1-0/)
-- [Redis Pub/Sub semantics](https://redis.io/docs/latest/develop/pubsub/)
+```mermaid
+flowchart LR
+    Bike[SunnyFit mini bike] <-->|Bluetooth LE| BlueZ[Linux / BlueZ]
+    BlueZ --> Collector[Rust collector\nStartup and reconnect]
+    Collector --> Raw[Raw events]
+    Raw --> Decoder[Frame assembly and decoding]
+    Decoder --> Workout[Workout calculations]
+    Raw --> Files[Local JSONL and history]
+    Workout --> Files
+    Workout --> TUI[Ratatui dashboard]
+    Raw --> Redis[Redis Pub/Sub]
+    Workout --> Redis
+    Redis --> Apps[Your applications / WebSocket bridge]
+```
+
+Raw packets are retained before interpretation. Each reconnect starts a new
+connection epoch and resets counter baselines. Unknown protocol fields remain in
+the recording; unavailable power, resistance or battery readings are not invented.
+The built-in startup is restricted to the verified model identifier and requests
+preservation of existing device session counters.
+
+## Build from source
+
+Rust 1.90+ and Debian build dependencies are required:
+
+```sh
+sudo apt install build-essential pkg-config libdbus-1-dev bluez firmware-realtek dpkg-dev python3 redis-server redis-tools
+make                 # show available targets
+make build           # development executable
+make check           # formatting, Clippy, unit and integration checks
+make deb             # optimized executable, .deb and checksum under dist/
+make demo            # simulated workout screen
+```
+
+The integration suite starts an isolated local Redis instance and exercises the
+TUI in a pseudo-terminal. `make release FEATURES=vendored-dbus` builds the D-Bus
+client library from source. The package includes an optional user service; see
+[background operation](docs/USAGE.md#background-service-and-deployment).
+
+## Compatibility and verification
+
+Tested with a **Sunny Health & Fitness SF-B023005DGY**, Debian 13 and a Realtek
+RTL8761BU adapter. Live checks covered startup, movement and stopping, forced
+disconnect/reconnect, forgetting and remembering the bike. Twelve Rust tests and
+the CLI/TUI/Redis integration suite passed; see [the validation record](VALIDATION.md).
+
+The bike supplies speed, cadence, device time, distance, estimated calories,
+odometer and status. Heart rate was unavailable, and the observed telemetry did
+not supply power, electronic resistance or battery. Standard FTMS/CSC support has
+parser tests but has not been verified against additional physical devices.
+Long unattended sleep/wake scenarios and other firmware versions remain to be tested.
+
+This is an independent project, not an official Sunny Health & Fitness application.
+Protocol research and observed limitations are documented in [PROTOCOL.md](docs/PROTOCOL.md).
+
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [CLI reference](docs/USAGE.md) | Commands, config, Redis, capture, replay and background service |
+| [Protocol](docs/PROTOCOL.md) | GATT sources, startup, frame layout, units and hardware evidence |
+| [Validation](VALIDATION.md) | Automated checks, physical-bike tests and remaining limits |
+| [Debian deployment](docs/DEPLOYMENT.md) | Package builds, APT workflow and signing responsibilities |
+| [Contributing](CONTRIBUTING.md) | Development checks, bug reports and compatibility evidence |
+
+## Contribute
+
+Use the [issue chooser](https://github.com/kawaiipantsu/sunnyfit-ble-cli/issues/new/choose)
+for **bugs**, **feature requests**, **bike compatibility**, or **documentation fixes**.
+Include the CLI version, distro, relevant hardware and the smallest useful example.
+Sanitize logs before posting. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+The application is [MIT licensed](LICENSE). Dependencies retain their own licenses.
+The project does not redistribute SunnyFit APKs or decompiled application source.
+
+---
+
+<div align="center"><samp>THUGS(red) · KEEP PEDALING · KEEP YOUR DATA · BUILD YOUR OWN TOOLS</samp></div>

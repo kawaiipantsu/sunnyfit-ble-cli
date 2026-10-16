@@ -1,0 +1,63 @@
+name: Bike compatibility
+description: Report results with a bike model, firmware, or Bluetooth adapter.
+title: "Compatibility: "
+labels: [compatibility]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Record what you observed, including working devices. Do not post MAC addresses, serial numbers, APKs, decompiled vendor code, or unreviewed capture files.
+  - type: input
+    id: model
+    attributes:
+      label: Exact bike model
+      placeholder: SF-B023005DGY
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware / hardware revision
+      description: Include Device Information values if available; unknown is fine.
+  - type: textarea
+    id: environment
+    attributes:
+      label: CLI and host environment
+      description: CLI version, distro/version, kernel, and Bluetooth adapter chipset. Please omit hostnames and addresses.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall result
+      options:
+        - Works
+        - Partially works
+        - Discovered but cannot connect or receive telemetry
+        - Not discovered
+    validations:
+      required: true
+  - type: checkboxes
+    id: exercised
+    attributes:
+      label: Flows exercised
+      options:
+        - label: Phone disconnected and bike awake
+        - label: Scan and connect
+        - label: Explicit Bluetooth pairing
+        - label: Movement and stopping
+        - label: Disconnect and automatic reconnect
+        - label: Forget and connect again
+        - label: Sleep and wake
+  - type: textarea
+    id: observations
+    attributes:
+      label: Observed readings and behavior
+      description: Which measurements arrive? If comparing with the bike display, state the units and whether readings were observed at the same time.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized supporting evidence
+      description: Include a short relevant log or UUID/field excerpt, public documentation, or screenshots. Keep complete personal recordings private.

@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a reproducible problem with the CLI, TUI, Bluetooth, or Redis.
+title: "Bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. Share only the relevant excerpt of a log; remove BLE addresses, serial numbers, Redis credentials and personal workout data.
+  - type: input
+    id: version
+    attributes:
+      label: CLI version
+      description: Output of sunnyfit-ble-cli --version.
+      placeholder: sunnyfit-ble-cli 0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Distro/version, kernel version, install method, and terminal if relevant. For Bluetooth problems, include the bike model, firmware if known, and adapter chipset.
+      placeholder: Debian 13; installed through APT; SF-B023005DGY; RTL8761BU adapter
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Bluetooth discovery / connection / pairing
+        - Reconnect / forget
+        - Workout TUI
+        - Measurements / calculations
+        - Local recording / replay / history
+        - Redis / JSON output
+        - Configuration / command arguments
+        - Build / Debian package / service
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the command and relevant settings with private values replaced. Mention whether demo mode also reproduces the issue.
+      placeholder: |
+        1. Wake the bike and disconnect the phone.
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include how often it happens and any workaround you found.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      description: A short error excerpt, doctor output, or screenshot is enough to start. Review attachments for private information.

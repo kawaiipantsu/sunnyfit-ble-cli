@@ -94,8 +94,10 @@ reception or identical ordering for every acquisition path.
 - The configured APT API and token were verified with `GET <API URL>/suites`
   (HTTP 200), including the configured suite. A root-path `token_scope_required`
   response and separate documentation access failures do not mean the API is
-  unavailable. Upload/stage/publish still await their request schema. No package
-  was signed or published. The signing helper follows the accessible signing
+  unavailable. The server upload/stage/publish schema was subsequently located in its local
+  canonical documentation; the current client helper implements readiness checks
+  and optional signing only. No publication was performed during this validation. The signing helper follows the accessible signing
   OpenAPI; its remote execution remains untested.
-- Git remains local. Commits use the existing global identity; public package
-  metadata uses a generic maintainer and contains no private identity or credentials.
+- At the time of the hardware validation, Git was local. GitHub publication was
+  subsequently requested by the owner. Commits use the existing global identity;
+  package metadata uses a generic maintainer and contains no private credentials.

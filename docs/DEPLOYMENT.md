@@ -1,47 +1,86 @@
-# Debian package and private APT deployment
+# Debian packages and APT deployment
 
-`make deb` builds `dist/sunnyfit-ble-cli_0.2.0-1_<architecture>.deb` and its SHA-256
-checksum. The package installs the executable, README/protocol/license, and an
-optional systemd user unit. Installation never starts a workout or enables a
-service. Runtime library requirements are resolved from the built ELF by
-`dpkg-shlibdeps`; the package built on Debian 13 requires libc6 >= 2.39. Rebuild
-on the oldest intended Debian release if distributing to older systems.
+Debian packages are distributed through [apt.thugs.red](https://apt.thugs.red).
+GitHub hosts the source and issue tracker; GitHub Releases are not part of the
+distribution workflow. Follow the [APT setup guide](https://apt.thugs.red/help)
+to configure the repository, then install `sunnyfit-ble-cli` through APT.
 
-The package uses generic public maintainer metadata. It deliberately excludes
-personal Git identity. `DEB_MAINTAINER` can be supplied explicitly when preparing
-an intentionally public release. Git commits themselves use the existing global
-identity, with no repository-local replacement and no configured remote.
+## Build a package
 
-Private service URLs and credentials are read at runtime from the external
-`/root/xxc-thugs-apt.txt`, or a different file passed with `--instructions`.
-They are not copied into source, package contents, command arguments or logs.
+`make deb` builds `dist/sunnyfit-ble-cli_0.2.0-1_<architecture>.deb` and a SHA-256
+checksum. The package installs the executable, documentation, license, and an
+optional systemd user unit. Installation does not enable the service.
+Runtime requirements are resolved from the built ELF by `dpkg-shlibdeps`; the
+Debian 13 build requires libc6 >= 2.39. Build on the oldest supported Debian
+release when preparing a package for older systems.
+
+Package metadata uses a generic maintainer. `DEB_MAINTAINER` can be supplied
+explicitly for a public release. Git commits use the configured global identity;
+private signing and deployment credentials are never package metadata.
+
+## Operator configuration
+
+Private API addresses and credentials are loaded at runtime from the external
+`/root/xxc-thugs-apt.txt` runbook. `/root/xxc-thugsred-apt.txt` is an alias on the
+operator's host. Other installations can supply `--instructions PATH`.
+Neither the file nor its secrets belong in Git, package files or logs.
 
 ```sh
 make deploy
+# Equivalent read-only readiness check:
+python3 scripts/deploy.py --check --instructions /path/to/private-runbook.txt
+```
+
+The current helper checks authentication and configured suites. It does not
+upload, stage or publish; `make deploy` also builds the local package first.
+For publishing, use the documented API workflow or an operator-maintained client.
+The complete request schemas are available in the
+[APT automation guide](https://apt.thugs.red/api/guide.md) and
+[OpenAPI reference](https://apt.thugs.red/api/openapi.json).
+
+Use the operator-provided administrative API base exactly. Documentation URLs,
+HTML login pages and the bare API root have different routing/authorization.
+A root-path `token_scope_required` response does not establish that supported
+endpoints are unavailable. Preflight an allowed `/suites` or `/status` request,
+including an explicitly authorized `suite` query parameter.
+
+## Publish a reviewed package
+
+All paths below are relative to the configured administrative API base and use
+`?suite=<allowed-suite>`. Send `Authorization: Bearer` from a protected credential
+source, without cookies. The token needs `read`, `upload`, `stage` and `publish`.
+
+1. POST raw `.deb` bytes to `/uploads`, using
+   `Content-Type: application/vnd.debian.binary-package`. Save the returned `id`.
+2. POST `/uploads/{id}/stage` with no request body.
+3. GET `/repository/diff`. Check its suite and every selected change. Reject
+   unrelated additions, unexpected removals, downgrades or removed architectures.
+4. POST `/repository/publish` with JSON `{"review_token":"<diff.token>"}`.
+5. Poll `/jobs/{job_id}` with the same token and suite until `state` is `succeeded`
+   or `failed`. HTTP 202 only acknowledges the job; it is not publication success.
+6. Verify the exact package/version through APT and compare its downloaded
+   SHA-256 with the original artifact.
+
+A suite is shared: publication can include another project's staged packages.
+A changed review requires fetching and inspecting a new diff. After an ambiguous
+publish timeout, inspect existing jobs before retrying. Identical uploads are
+idempotent; different bytes for the same name/version/architecture require a new
+Debian version. Preserve the exact artifact through distribution and verification.
+
+## Signing responsibilities
+
+The APT server signs repository Release/InRelease metadata during publication.
+A separate signature on each `.deb` is not required for that workflow.
+
+For an explicitly requested standalone detached signature, the helper also offers:
+
+```sh
 python3 scripts/deploy.py --sign dist/sunnyfit-ble-cli_0.2.0-1_amd64.deb \
   --key-id YOUR_SIGNING_KEY_ID
 ```
 
-The signing helper follows the signing service's inspected OpenAPI:
-`POST /api/v1/debian/sign`, bearer authentication, `key_id`, `kind: deb`, and
-base64 file content. The service returns a detached `.deb.asc` signature, not
-an embedded dpkg/debsigs signature. Its documented file limit is 8 MiB. Signing
-is explicitly invoked and has not been exercised with the user's key.
-
-The supplied **API URL** is used directly for API operations. `--check` performs
-an authenticated `GET <API URL>/suites` and verifies that the configured suites
-exist. This succeeded against the user's server. The API root itself returned
-`token_scope_required`; that response does not describe access to the supported
-suite endpoint or prove that upload/publish operations are unavailable.
-
-The separate API Guide URL returned a ban page. Accessing `/api` on the local API
-server instead redirected to the browser admin login; a bearer token did not
-grant that documentation route. These documentation failures must not be
-reported as an APT API outage. The token's private instructions list read, upload,
-stage and publish scopes, but their write request schemas still need to be read
-before implementing those actions. No guessed write request has been sent.
-
-No package has been signed, uploaded, staged or published. Repository
-Release/InRelease signing is separate from a detached package signature and must
-follow the APT server's actual publication workflow. The local package is built,
-installed and tested while the deployment request schema is being obtained.
+This follows the signing service's `POST /api/v1/debian/sign` contract: `key_id`,
+`kind: deb`, and base64 file content. It returns a detached `.deb.asc`, preserves
+the package bytes and has an 8 MiB input limit. It does not create an embedded
+dpkg-sig/debsigs signature or publish to APT. The helper's remote signing action
+has not been tested with the operator's key.

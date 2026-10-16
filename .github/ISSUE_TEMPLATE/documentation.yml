@@ -1,0 +1,24 @@
+name: Documentation improvement
+description: Report unclear, missing, or incorrect instructions.
+title: "Docs: "
+labels: [documentation]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Page or section
+      description: Link the README, guide, command help, or section that needs attention.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is unclear or incorrect?
+      description: Include your environment if installation or usage instructions did not work.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: Describe the explanation or example you expected to find.

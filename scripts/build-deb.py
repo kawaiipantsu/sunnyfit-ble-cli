@@ -23,8 +23,10 @@ def install(src, dest, mode=0o644):
     p.chmod(mode)
 
 install('target/release/sunnyfit-ble-cli', 'usr/bin/sunnyfit-ble-cli', 0o755)
-for f in ['README.md', 'LICENSE', 'VALIDATION.md', 'docs/PROTOCOL.md',
-          'docs/DEPLOYMENT.md', 'docs/android-analysis.json']:
+for f in ['README.md', 'LICENSE', 'VALIDATION.md', 'CONTRIBUTING.md',
+          'docs/PROTOCOL.md', 'docs/USAGE.md', 'docs/DEPLOYMENT.md',
+          'docs/android-analysis.json', 'assets/sunnyfit_banner.png',
+          'assets/screenshots/workout-demo.png']:
     install(f, 'usr/share/doc/sunnyfit-ble-cli/' + f)
 install('packaging/sunnyfit-ble-cli.service', 'usr/lib/systemd/user/sunnyfit-ble-cli.service')
 # Resolve required runtime libraries from the actual binary.

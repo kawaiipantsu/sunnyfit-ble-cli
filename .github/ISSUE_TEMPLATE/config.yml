@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: CLI and configuration reference
+    url: https://github.com/kawaiipantsu/sunnyfit-ble-cli/blob/main/docs/USAGE.md
+    about: Commands, configuration, Redis channels, recording and replay.
+  - name: THUGS(red) APT setup
+    url: https://apt.thugs.red/help
+    about: Configure the Debian package repository.
