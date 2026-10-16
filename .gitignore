@@ -12,3 +12,5 @@
 *.changes
 .env.*
 config.toml
+__pycache__/
+*.pyc

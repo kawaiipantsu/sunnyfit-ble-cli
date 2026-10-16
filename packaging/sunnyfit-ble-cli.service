@@ -1,0 +1,15 @@
+[Unit]
+Description=SunnyFit Bluetooth workout recorder and Redis bridge
+After=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sunnyfit-ble-cli capture
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

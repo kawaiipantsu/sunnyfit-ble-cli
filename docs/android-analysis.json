@@ -1,0 +1,15 @@
+{
+  "package": "com.amoyyg.sunny",
+  "version": "2.19.0",
+  "version_code": 1025,
+  "apk_sha256": "0be39e130bb95c0ca57724d489741c0c00d09cdff44ddc04a5bd10ab83e40be0",
+  "distribution": "APKPure mirror; package identity matched Google Play listing",
+  "analysis": "static only; app never executed or logged into",
+  "protocol_sources": [
+    "com.healthfitness.bluetooth.dataparse.sunny.BleSunnyHorseRidingMachine",
+    "com.healthfitness.bluetooth.utils.SunnyInstructionCollectionUtils",
+    "com.healthfitness.bluetooth.utils.HexUtil",
+    "com.healthfitness.common.utils.EquipmentSportCalculationUtils",
+    "com.healthfitness.common.utils.NumberFormattingUtils"
+  ]
+}

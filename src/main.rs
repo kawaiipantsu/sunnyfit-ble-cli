@@ -1,704 +1,493 @@
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    future::Future,
-    io::{self, Write},
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
-
+mod ble;
+mod config;
+mod metrics;
+mod publish;
+mod storage;
+mod sunny;
+mod tui;
 use anyhow::{anyhow, bail, Context, Result};
-use bluer::{
-    gatt::remote::Characteristic, Adapter, AdapterEvent, Address, Device, DeviceEvent,
-    DeviceProperty, DiscoveryFilter, DiscoveryTransport, Session,
-};
-use clap::{Args, Parser, Subcommand};
-use futures::{stream, stream::BoxStream, stream::SelectAll, StreamExt};
-use redis::AsyncCommands;
+use clap::Parser;
+use config::{Cli, Command, Config};
+use metrics::{Decoder, Workout};
 use serde_json::{json, Value};
-use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
-
-#[derive(Parser)]
-#[command(
-    version,
-    about,
-    long_about = "Inspect a Linux BlueZ BLE device and capture raw GATT value updates.\nNo SunnyFit decoder or proprietary initialization is assumed. JSONL goes to stdout; diagnostics go to stderr."
-)]
-struct Cli {
-    /// BlueZ adapter name, e.g. hci0; otherwise use the default adapter.
-    #[arg(long, global = true)]
-    adapter: Option<String>,
-    /// Timeout for each Bluetooth setup/read operation.
-    #[arg(long, global = true, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
-    timeout_seconds: u64,
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Discover LE devices; cached entries are not evidence that a device is nearby.
-    Scan {
-        #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
-        seconds: u64,
+use std::{
+    collections::HashMap,
+    fs,
+    io::{BufRead, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc as sync_mpsc, Arc,
     },
-    /// Connect and list service, characteristic, descriptor UUIDs and local IDs.
-    Inspect {
-        #[command(flatten)]
-        device: DeviceArgs,
-        /// Read readable characteristic values. Does not subscribe or write.
-        #[arg(long)]
-        read: bool,
-    },
-    /// Subscribe to value updates and optionally publish the same JSON to Redis.
-    Capture {
-        #[command(flatten)]
-        device: DeviceArgs,
-        /// Capture duration AFTER subscriptions are ready; omit to run until Ctrl-C.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-        seconds: Option<u64>,
-        /// Select decimal SERVICE_ID:CHAR_ID from inspect; repeat to select several.
-        /// Omit to select all characteristics offering notify or indicate.
-        #[arg(long, value_parser = parse_selection)]
-        select: Vec<(u16, u16)>,
-        /// Redis URL. Prefer SUNNY_REDIS_URL to keep credentials out of shell history.
-        #[arg(long, env = "SUNNY_REDIS_URL", hide_env_values = true)]
-        redis_url: Option<String>,
-        #[arg(long, default_value = "sunny:bike:raw")]
-        channel: String,
-    },
-}
+    time::{Duration, Instant},
+};
+use storage::{unhex, Recorder};
+use tokio::{
+    sync::{mpsc, watch},
+    time::timeout,
+};
 
-#[derive(Args)]
-struct DeviceArgs {
-    /// Bluetooth address shown by scan, e.g. AA:BB:CC:DD:EE:FF.
-    address: Address,
-    /// Opt in to pairing/bonding using a NoInputNoOutput agent; never sets trust.
-    #[arg(long)]
-    pair: bool,
+struct Output {
+    tx: sync_mpsc::SyncSender<String>,
+    done: sync_mpsc::Receiver<()>,
+    lost: Arc<AtomicU64>,
 }
-
-fn parse_selection(value: &str) -> std::result::Result<(u16, u16), String> {
-    let (service, characteristic) = value
-        .split_once(':')
-        .ok_or("use decimal SERVICE_ID:CHAR_ID, e.g. 12:14")?;
-    let parse = |s: &str| {
-        s.parse::<u16>()
-            .map_err(|_| "IDs must be decimal u16 values".to_owned())
-    };
-    Ok((parse(service)?, parse(characteristic)?))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 15) as usize] as char);
-    }
-    out
-}
-
-fn unix_ms() -> Result<u128> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())
-}
-
-fn emit(value: &Value) -> Result<String> {
-    let line = serde_json::to_string(value)?;
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{line}").context("writing JSONL to stdout")?;
-    stdout.flush().context("flushing JSONL to stdout")?;
-    Ok(line)
-}
-
-async fn bounded<T>(
-    limit: Duration,
-    label: &str,
-    operation: impl Future<Output = bluer::Result<T>>,
-) -> Result<T> {
-    timeout(limit, operation)
-        .await
-        .with_context(|| format!("{label} timed out"))?
-        .with_context(|| label.to_owned())
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let limit = Duration::from_secs(cli.timeout_seconds);
-    let session = bounded(limit, "opening BlueZ session", Session::new()).await?;
-    let adapter = if let Some(name) = cli.adapter.as_deref() {
-        session.adapter(name)?
-    } else {
-        bounded(
-            limit,
-            "finding default Bluetooth adapter",
-            session.default_adapter(),
-        )
-        .await?
-    };
-    if !bounded(limit, "checking adapter power", adapter.is_powered()).await? {
-        bail!(
-            "adapter {} is powered off; enable Bluetooth and retry",
-            adapter.name()
-        );
-    }
-    match &cli.command {
-        Command::Scan { seconds } => {
-            tokio::select! {
-                result = scan(&adapter, *seconds, limit) => result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal.context("listening for Ctrl-C")?;
-                    eprintln!("Scan interrupted.");
-                    Ok(())
+impl Output {
+    fn new() -> Self {
+        let (tx, rx) = sync_mpsc::sync_channel::<String>(1024);
+        let (done_tx, done) = sync_mpsc::channel();
+        let lost = Arc::new(AtomicU64::new(0));
+        let l = lost.clone();
+        std::thread::spawn(move || {
+            let mut out = std::io::stdout().lock();
+            for s in rx {
+                if writeln!(out, "{s}").and_then(|_| out.flush()).is_err() {
+                    l.fetch_add(1, Ordering::Relaxed);
+                    break;
                 }
             }
-        }
-        Command::Inspect { device, .. } | Command::Capture { device, .. } => {
-            with_device(&session, &adapter, device, &cli.command, limit).await
+            let _ = done_tx.send(());
+        });
+        Self { tx, done, lost }
+    }
+    fn send(&self, v: &Value) {
+        if self.tx.try_send(v.to_string()).is_err() {
+            self.lost.fetch_add(1, Ordering::Relaxed);
         }
     }
-}
-
-async fn scan(adapter: &Adapter, seconds: u64, limit: Duration) -> Result<()> {
-    let cached: HashSet<Address> =
-        bounded(limit, "listing cached devices", adapter.device_addresses())
-            .await?
-            .into_iter()
-            .collect();
-    let mut snapshots = HashMap::new();
-    eprintln!(
-        "Scanning {} for {seconds}s. Cached addresses and RSSI may be stale; wake/pedal the bike.",
-        adapter.name()
-    );
-    for &address in &cached {
-        scan_record(adapter, address, "cached", true, &mut snapshots, limit).await?;
+    fn finish(self) -> u64 {
+        drop(self.tx);
+        if self.done.recv_timeout(Duration::from_secs(2)).is_err() {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+        }
+        self.lost.load(Ordering::Relaxed)
     }
-    bounded(
-        limit,
-        "setting LE discovery filter",
-        adapter.set_discovery_filter(DiscoveryFilter {
-            transport: DiscoveryTransport::Le,
-            duplicate_data: true,
-            ..Default::default()
-        }),
-    )
-    .await?;
-    let events = bounded(
-        limit,
-        "starting discovery",
-        adapter.discover_devices_with_changes(),
-    )
-    .await?;
-    futures::pin_mut!(events);
-    let deadline = tokio::time::sleep(Duration::from_secs(seconds));
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            _ = &mut deadline => break,
-            event = events.next() => match event {
-                Some(AdapterEvent::DeviceAdded(address)) => {
-                    scan_record(adapter, address, "discovery_or_property_change", cached.contains(&address), &mut snapshots, limit).await?;
-                }
-                Some(_) => {},
-                None => bail!("Bluetooth discovery stream ended unexpectedly"),
-            }
-        }
-    }
-    Ok(()) // Dropping the discovery stream stops this client's discovery session.
 }
-
-async fn scan_record(
-    adapter: &Adapter,
-    address: Address,
-    source: &str,
-    cached: bool,
-    snapshots: &mut HashMap<Address, Value>,
-    limit: Duration,
-) -> Result<()> {
-    let device = adapter.device(address)?;
-    let values = timeout(limit, async {
-        tokio::try_join!(
-            device.name(),
-            device.rssi(),
-            device.manufacturer_data(),
-            device.service_data(),
-            device.uuids()
-        )
-    })
-    .await;
-    let (name, rssi, manufacturer, service_data, uuids) = match values {
-        Ok(Ok(values)) => values,
-        other => {
-            eprintln!("Skipping unavailable device {address}: {other:?}");
-            return Ok(());
-        }
-    };
-    let manufacturer: BTreeMap<_, _> = manufacturer
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, bytes)| (format!("{id:04x}"), hex(&bytes)))
-        .collect();
-    let service_data: BTreeMap<_, _> = service_data
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, bytes)| (id.to_string(), hex(&bytes)))
-        .collect();
-    let mut uuids: Vec<_> = uuids
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| u.to_string())
-        .collect();
-    uuids.sort();
-    let snapshot = json!({"name":name,"rssi":rssi,"manufacturer_data_hex":manufacturer,
-        "service_data_hex":service_data,"service_uuids":uuids});
-    if snapshots.get(&address) == Some(&snapshot) {
-        return Ok(());
-    }
-    snapshots.insert(address, snapshot.clone());
-    emit(
-        &json!({"type":"device","timestamp_unix_ms":unix_ms()?,"adapter":adapter.name(),
-        "address":address.to_string(),"source":source,"cached_at_start":cached,"properties":snapshot}),
-    )?;
-    Ok(())
+struct Engine {
+    rec: Recorder,
+    publisher: Option<publish::Publisher>,
+    output: Option<Output>,
+    c: Config,
+    workout: Workout,
+    decoders: HashMap<String, Decoder>,
+    epoch: u64,
+    raw: u64,
+    unknown: u64,
+    coverage_errors: u64,
+    gaps: u64,
 }
-
-async fn with_device(
-    session: &Session,
-    adapter: &Adapter,
-    args: &DeviceArgs,
-    command: &Command,
-    limit: Duration,
-) -> Result<()> {
-    let device = adapter.device(args.address)?;
-    let was_connected = bounded(limit, "checking connection", device.is_connected()).await?;
-    let mut publisher = match command {
-        Command::Capture {
-            redis_url: Some(url),
-            channel,
-            ..
-        } => Some(Publisher::new(url, channel.clone())?),
-        _ => None,
-    };
-    // Keep the agent alive for the whole operation, including cancellation/cleanup.
-    let mut agent = None;
-    let operation = async {
-        if args.pair && !bounded(limit, "checking pairing", device.is_paired()).await? {
-            agent = Some(
-                bounded(
-                    limit,
-                    "registering pairing agent",
-                    session.register_agent(bluer::agent::Agent::default()),
-                )
-                .await?,
-            );
-            bounded(
-                limit,
-                "pairing (for PIN/passkey devices use bluetoothctl)",
-                device.pair(),
-            )
-            .await?;
+impl Engine {
+    fn emit(&mut self, row: Value, ms: u64, channel: &str) -> Result<Value> {
+        let row = self.rec.record(row, ms)?;
+        if let Some(p) = &mut self.publisher {
+            p.enqueue(channel, &row);
         }
-        if !bounded(limit, "checking connection", device.is_connected()).await? {
-            bounded(
-                limit,
-                "connecting; scan first if BlueZ does not know this address",
-                device.connect(),
-            )
-            .await?;
-        }
-        match command {
-            Command::Inspect { read, .. } => inspect(adapter, &device, *read, limit).await,
-            Command::Capture {
-                seconds, select, ..
-            } => {
-                capture(
-                    adapter,
-                    &device,
-                    *seconds,
-                    select,
-                    publisher.as_mut(),
-                    limit,
-                )
-                .await
-            }
-            Command::Scan { .. } => unreachable!(),
-        }
-    };
-    let result = tokio::select! {
-        result = operation => result,
-        signal = tokio::signal::ctrl_c() => {
-            match signal {
-                Ok(()) => { eprintln!("Interrupted; stopping subscriptions and cleaning up."); Ok(()) },
-                Err(error) => Err(error).context("listening for Ctrl-C"),
-            }
-        }
-    };
-    // Drop cancels Pair; Disconnect also cancels an in-flight Connect. Do this on errors too.
-    let cleanup = if !was_connected {
-        bounded(limit, "disconnecting device", device.disconnect()).await
-    } else {
-        eprintln!("Leaving the pre-existing Bluetooth connection connected.");
-        Ok(())
-    };
-    drop(agent);
-    let forwarding = if let Some(publisher) = publisher {
-        publisher.finish().await
-    } else {
-        Ok(())
-    };
-    for error in [&cleanup, &forwarding]
-        .into_iter()
-        .filter_map(|r| r.as_ref().err())
-    {
-        eprintln!("Cleanup/forwarding: {error:#}");
-    }
-    result.and(cleanup).and(forwarding)
-}
-
-async fn inspect(adapter: &Adapter, device: &Device, read: bool, limit: Duration) -> Result<()> {
-    let mut services = bounded(limit, "resolving GATT services", device.services()).await?;
-    services.sort_by_key(|s| s.id());
-    eprintln!("GATT IDs below are decimal BlueZ instance IDs; re-inspect after rediscovery. No notification subscriptions are active.");
-    for service in services {
-        let service_uuid = bounded(limit, "reading service UUID", service.uuid())
-            .await?
-            .to_string();
-        emit(
-            &json!({"type":"service","adapter":adapter.name(),"address":device.address().to_string(),
-            "service_id":service.id(),"service_uuid":service_uuid}),
-        )?;
-        let mut characteristics =
-            bounded(limit, "listing characteristics", service.characteristics()).await?;
-        characteristics.sort_by_key(|c| c.id());
-        for characteristic in characteristics {
-            let uuid = bounded(limit, "reading characteristic UUID", characteristic.uuid())
-                .await?
-                .to_string();
-            let flags = bounded(
-                limit,
-                "reading characteristic flags",
-                characteristic.flags(),
-            )
-            .await?;
-            let mut row = json!({"type":"characteristic","service_id":service.id(),"service_uuid":service_uuid,
-                "characteristic_id":characteristic.id(),"characteristic_uuid":uuid,"properties":flags});
-            if read && flags.read {
-                match bounded(limit, "reading characteristic value", characteristic.read()).await {
-                    Ok(bytes) => row["read_hex"] = json!(hex(&bytes)),
-                    Err(error) => row["read_error"] = json!(format!("{error:#}")),
-                }
-            }
-            emit(&row)?;
-            let mut descriptors =
-                bounded(limit, "listing descriptors", characteristic.descriptors()).await?;
-            descriptors.sort_by_key(|d| d.id());
-            for descriptor in descriptors {
-                emit(
-                    &json!({"type":"descriptor","service_id":service.id(),"characteristic_id":characteristic.id(),
-                    "descriptor_id":descriptor.id(),"descriptor_uuid":bounded(limit,"reading descriptor UUID",descriptor.uuid()).await?.to_string()}),
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-#[derive(Clone)]
-struct Source {
-    service_id: u16,
-    service_uuid: String,
-    characteristic_id: u16,
-    characteristic_uuid: String,
-}
-
-enum Update {
-    Value(Source, Vec<u8>),
-    Closed(Source),
-}
-
-async fn capture(
-    adapter: &Adapter,
-    device: &Device,
-    seconds: Option<u64>,
-    selected: &[(u16, u16)],
-    mut publisher: Option<&mut Publisher>,
-    limit: Duration,
-) -> Result<()> {
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let start = Instant::now();
-    let mut device_events = bounded(limit, "watching connection state", device.events())
-        .await?
-        .boxed();
-    if !bounded(limit, "checking connection state", device.is_connected()).await? {
-        bail!("device disconnected before capture");
-    }
-    let mut candidates: Vec<(Source, Characteristic)> = Vec::new();
-    let requested: HashSet<_> = selected.iter().copied().collect();
-    for service in bounded(limit, "resolving GATT services", device.services()).await? {
-        let service_uuid = bounded(limit, "reading service UUID", service.uuid())
-            .await?
-            .to_string();
-        for characteristic in
-            bounded(limit, "listing characteristics", service.characteristics()).await?
-        {
-            let key = (service.id(), characteristic.id());
-            if !requested.is_empty() && !requested.contains(&key) {
-                continue;
-            }
-            let flags = bounded(
-                limit,
-                "reading characteristic flags",
-                characteristic.flags(),
-            )
-            .await?;
-            if !flags.notify && !flags.indicate {
-                if requested.contains(&key) {
-                    bail!(
-                        "selected characteristic {}:{} does not offer notify or indicate",
-                        key.0,
-                        key.1
-                    );
-                }
-                continue;
-            }
-            candidates.push((
-                Source {
-                    service_id: key.0,
-                    service_uuid: service_uuid.clone(),
-                    characteristic_id: key.1,
-                    characteristic_uuid: bounded(
-                        limit,
-                        "reading characteristic UUID",
-                        characteristic.uuid(),
+        if self.c.debug_stdout {
+            if let Some(out) = &self.output {
+                if self.c.verbose
+                    || matches!(
+                        row["type"].as_str(),
+                        Some("connection" | "ready" | "retry" | "workout_summary")
                     )
-                    .await?
-                    .to_string(),
-                },
-                characteristic,
-            ));
-        }
-    }
-    for &(service, characteristic) in &requested {
-        if !candidates
-            .iter()
-            .any(|(s, _)| s.service_id == service && s.characteristic_id == characteristic)
-        {
-            bail!(
-                "selected characteristic {service}:{characteristic} was not found; inspect again"
-            );
-        }
-    }
-    if candidates.is_empty() {
-        bail!("no notify/indicate characteristics found; save the inspect output for analysis");
-    }
-    candidates.sort_by_key(|(s, _)| (s.service_id, s.characteristic_id));
-    let mut streams: SelectAll<BoxStream<'static, Update>> = SelectAll::new();
-    let mut skipped = 0usize;
-    for (source, characteristic) in candidates {
-        let notifications = match bounded(
-            limit,
-            "subscribing to characteristic",
-            characteristic.notify(),
-        )
-        .await
-        {
-            Ok(notifications) => notifications,
-            Err(error) => {
-                let error = error.context(format!(
-                    "characteristic {}:{} ({})",
-                    source.service_id, source.characteristic_id, source.characteristic_uuid
-                ));
-                if !requested.is_empty() {
-                    return Err(error);
+                {
+                    out.send(&row);
                 }
-                eprintln!("Skipping failed subscription: {error:#}");
-                skipped += 1;
-                continue;
             }
-        };
-        eprintln!(
-            "Subscribed {}:{} service={} characteristic={}",
-            source.service_id,
-            source.characteristic_id,
-            source.service_uuid,
-            source.characteristic_uuid
-        );
-        let end_source = source.clone();
-        streams.push(
-            notifications
-                .map(move |bytes| Update::Value(source.clone(), bytes))
-                .chain(stream::once(async move { Update::Closed(end_source) }))
-                .boxed(),
-        );
+        }
+        Ok(row)
     }
-    if streams.is_empty() {
-        bail!(
-            "all {skipped} candidate notification subscriptions failed; inspect the errors above"
+    fn input(&mut self, row: Value, ms: u64) -> Result<()> {
+        let epoch = row["epoch"].as_u64().unwrap_or(0);
+        if epoch != self.epoch {
+            self.decoders.clear();
+            self.epoch = epoch;
+        }
+        let kind = row["type"].as_str().unwrap_or("").to_owned();
+        if kind == "connection" {
+            self.workout
+                .connection(row["state"].as_str().unwrap_or("unknown"));
+        }
+        if kind == "coverage_gap" {
+            self.gaps += 1;
+        }
+        if kind.ends_with("error") || row["outcome"] == "failed" {
+            self.coverage_errors += 1;
+        }
+        let is_value = matches!(
+            kind.as_str(),
+            "notification" | "gatt_value_update" | "read_result"
         );
-    }
-    if skipped > 0 {
-        eprintln!(
-            "Partial capture: {skipped} characteristic subscriptions failed; {} succeeded.",
-            streams.len()
-        );
-    }
-    eprintln!("Ready; session {session_id}. Pedal the bike now. No value reads or application writes are issued during capture.");
-    let deadline = async {
-        if let Some(seconds) = seconds {
-            tokio::time::sleep(Duration::from_secs(seconds)).await;
+        let channel = if matches!(
+            kind.as_str(),
+            "connection" | "coverage_gap" | "retry" | "ready"
+        ) {
+            self.c.status_channel.clone()
         } else {
-            futures::future::pending::<()>().await;
-        }
-    };
-    tokio::pin!(deadline);
-    let mut sequence = 0u64;
-    loop {
-        tokio::select! {
-            _ = &mut deadline => { eprintln!("Capture duration complete; {sequence} value updates recorded."); break; }
-            event = device_events.next() => match event {
-                Some(DeviceEvent::PropertyChanged(DeviceProperty::Connected(false))) => bail!("bike disconnected unexpectedly after {sequence} updates"),
-                None => bail!("device event stream ended unexpectedly after {sequence} updates"),
-                _ => {},
-            },
-            event = streams.next() => match event {
-                Some(Update::Value(source, bytes)) => {
-                    sequence += 1;
-                    let row = json!({"schema":"sunny-ble.raw.v1","type":"gatt_value_update",
-                        "session_id":session_id,"sequence":sequence,"timestamp_unix_ms":unix_ms()?,
-                        "elapsed_ms":start.elapsed().as_millis(),"adapter":adapter.name(),"address":device.address().to_string(),
-                        "service_id":source.service_id,"service_uuid":source.service_uuid,
-                        "characteristic_id":source.characteristic_id,"characteristic_uuid":source.characteristic_uuid,
-                        "value_hex":hex(&bytes),"value_length":bytes.len()});
-                    let line = emit(&row)?; // Stdout is authoritative: enqueue only after the line is written.
-                    if let Some(publisher) = publisher.as_mut() { publisher.enqueue(line); }
+            self.c.raw_channel.clone()
+        };
+        let row = self.emit(row, ms, &channel)?;
+        if is_value {
+            self.raw += 1;
+            let uuid = row["characteristic_uuid"].as_str().unwrap_or("");
+            let source = format!(
+                "{}:{}:{}",
+                row["service_id"], row["characteristic_id"], uuid
+            );
+            let bytes = unhex(row["value_hex"].as_str().unwrap_or(""))?;
+            let observed = row["observed_elapsed_ms"].as_u64().unwrap_or(ms);
+            let decoder = self.decoders.entry(source).or_default();
+            let result = decoder.decode_event(
+                uuid,
+                &bytes,
+                observed,
+                &self.c,
+                row["sequence"].as_u64().unwrap_or(0),
+            );
+            let pending = decoder.pending();
+            match result {
+                Ok(Some(sample)) => {
+                    let decoded =
+                        json!({"type":"decoded","source_event":row["sequence"],"sample":sample});
+                    self.workout
+                        .ingest(sample, ms, row["sequence"].as_u64().unwrap(), &self.c);
+                    let ch = self.c.metrics_channel.clone();
+                    self.emit(decoded, ms, &ch)?;
                 }
-                Some(Update::Closed(source)) => bail!("notification stream {}:{} ended unexpectedly",source.service_id,source.characteristic_id),
-                None => bail!("all notification streams ended unexpectedly"),
+                Ok(None) => {
+                    if !pending {
+                        self.unknown += 1;
+                    }
+                }
+                Err(e) => {
+                    self.coverage_errors += 1;
+                    let ch = self.c.status_channel.clone();
+                    self.emit(json!({"type":"decode_error","source_event":row["sequence"],"error":e.to_string()}),ms,&ch)?;
+                }
             }
         }
+        Ok(())
+    }
+}
+async fn shutdown_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler");
+    tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
+}
+fn address(c: &Config, explicit: Option<bluer::Address>) -> Result<bluer::Address> {
+    explicit
+        .or_else(|| c.device.as_deref().and_then(|s| s.parse().ok()))
+        .context("choose a bike with --device ADDRESS, or run scan then connect ADDRESS")
+}
+fn base_dir(c: &Config, config: &Path) -> PathBuf {
+    c.output_dir.clone().unwrap_or_else(|| {
+        config
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("past-workouts")
+    })
+}
+async fn demo(out: ble::Events, mut stop: watch::Receiver<bool>) -> Result<()> {
+    out.state("ready").await?;
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut n = 0u16;
+    loop {
+        tokio::select! {_=stop.changed()=>break,_=interval.tick()=>{
+            let rpm=55.+(n as f64/5.).sin()*12.;let speed=(rpm*0.3*100.) as u16;
+            let mut bytes=vec![0x44,0];bytes.extend(speed.to_le_bytes());bytes.extend(((rpm*2.) as u16).to_le_bytes());bytes.extend(65u16.to_le_bytes());
+            out.send(json!({"type":"notification","demo":true,"service_id":1,"characteristic_id":2,"characteristic_uuid":"00002ad2-0000-1000-8000-00805f9b34fb","value_hex":storage::hex(&bytes),"value_length":bytes.len()})).await?;n=n.wrapping_add(1);
+        }}
     }
     Ok(())
 }
-
-#[derive(Default)]
-struct RedisStats {
-    published: AtomicU64,
-    failed: AtomicU64,
-    unavailable: AtomicBool,
-}
-
-struct Publisher {
-    sender: Option<mpsc::Sender<String>>,
-    worker: JoinHandle<()>,
-    stats: Arc<RedisStats>,
-    enqueued: u64,
-    dropped: u64,
-}
-
-impl Publisher {
-    fn new(url: &str, channel: String) -> Result<Self> {
-        // Do not include a Redis URL or errors that could contain its credentials in diagnostics.
-        let client = redis::Client::open(url)
-            .map_err(|_| anyhow!("invalid Redis URL; check SUNNY_REDIS_URL"))?;
-        let (sender, mut receiver) = mpsc::channel::<String>(512);
-        let stats = Arc::new(RedisStats::default());
-        let worker_stats = stats.clone();
-        let worker = tokio::spawn(async move {
-            let mut connection = match timeout(
-                Duration::from_secs(5),
-                client.get_multiplexed_async_connection(),
-            )
-            .await
-            {
-                Ok(Ok(connection)) => Some(connection),
-                _ => {
-                    worker_stats.unavailable.store(true, Ordering::Relaxed);
-                    eprintln!("Redis connection failed/timed out. Forwarding is disabled for this capture; stdout continues.");
-                    None
-                }
-            };
-            while let Some(line) = receiver.recv().await {
-                let successful = if let Some(connection) = &mut connection {
-                    let publish = async {
-                        let result: redis::RedisResult<u64> =
-                            connection.publish(&channel, &line).await;
-                        result
-                    };
-                    matches!(timeout(Duration::from_secs(2), publish).await, Ok(Ok(_)))
-                } else {
-                    false
-                };
-                if successful {
-                    worker_stats.published.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    worker_stats.failed.fetch_add(1, Ordering::Relaxed);
-                    worker_stats.unavailable.store(true, Ordering::Relaxed);
-                    if connection.take().is_some() {
-                        eprintln!("Redis PUBLISH failed/timed out; delivery is unconfirmed. Forwarding disabled; stdout continues.");
+async fn record(
+    cli: &Cli,
+    c: Config,
+    config_path: &Path,
+    mode: ble::Mode,
+    explicit: Option<bluer::Address>,
+) -> Result<()> {
+    let selected = if cli.demo {
+        None
+    } else {
+        Some(address(&c, explicit)?)
+    };
+    let mut ui = if cli.workout {
+        Some(tui::Ui::new()?)
+    } else {
+        None
+    };
+    let publisher = publish::Publisher::new(&c)?;
+    let rec = Recorder::new(&base_dir(&c, config_path), cli.demo)?;
+    let mut e = Engine {
+        rec,
+        publisher,
+        output: if c.debug_stdout {
+            Some(Output::new())
+        } else {
+            None
+        },
+        c: c.clone(),
+        workout: Workout::default(),
+        decoders: HashMap::new(),
+        epoch: 0,
+        raw: 0,
+        unknown: 0,
+        coverage_errors: 0,
+        gaps: 0,
+    };
+    let start = Instant::now();
+    let (tx, mut rx) = mpsc::channel(4096);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let out = ble::Events {
+        tx,
+        epoch: 0,
+        start,
+    };
+    let mut worker = if cli.demo {
+        tokio::spawn(demo(out, stop_rx))
+    } else {
+        tokio::spawn(ble::run(c.clone(), selected.unwrap(), mode, stop_rx, out))
+    };
+    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    let signal = shutdown_signal();
+    tokio::pin!(signal);
+    let mut worker_result = None;
+    let mut last_metrics = 0u64;
+    let result:Result<()>=async{
+        loop{
+            tokio::select!{
+                _=&mut signal=>break,
+                row=rx.recv()=>match row{Some(row)=>{e.input(row,start.elapsed().as_millis() as u64)?;},None=>break},
+                result=&mut worker=>{worker_result=Some(result);break;},
+                _=tick.tick()=>{
+                    let ms=start.elapsed().as_millis() as u64;e.workout.tick(ms,&c);
+                    if cli.seconds.is_some_and(|s|start.elapsed()>=Duration::from_secs(s)){break;}
+                    if ms/1000>last_metrics{last_metrics=ms/1000;let ch=c.metrics_channel.clone();e.emit(json!({"type":"metrics","workout":e.workout}),ms,&ch)?;}
+                    if let Some(ui)=&mut ui{
+                        match ui.input()?{tui::Action::Quit=>break,tui::Action::Pause=>{e.workout.set_paused(!e.workout.paused);let ch=c.status_channel.clone();e.emit(json!({"type":"pause","paused":e.workout.paused}),ms,&ch)?;},tui::Action::Marker=>{let ch=c.status_channel.clone();e.emit(json!({"type":"marker","label":"user marker"}),ms,&ch)?;},tui::Action::None=>{}}
+                        let status=if let Some(p)=&e.publisher{p.stats().to_string()}else{"off".into()};
+                        ui.draw(&e.workout,&c,cli.demo,e.raw,e.unknown,&status)?;
                     }
                 }
             }
-        });
-        Ok(Self {
-            sender: Some(sender),
-            worker,
-            stats,
-            enqueued: 0,
-            dropped: 0,
-        })
-    }
-
-    fn enqueue(&mut self, line: String) {
-        if self
-            .sender
-            .as_ref()
-            .expect("publisher is active")
-            .try_send(line)
-            .is_ok()
-        {
-            self.enqueued += 1;
-        } else {
-            self.dropped += 1;
-            if self.dropped == 1 || self.dropped % 100 == 0 {
-                eprintln!(
-                    "Redis queue full/closed: {} messages skipped; JSONL stdout retains them.",
-                    self.dropped
-                );
-            }
-        }
-    }
-
-    async fn finish(mut self) -> Result<()> {
-        self.sender.take();
-        let mut worker_failed = false;
-        match timeout(Duration::from_secs(5), &mut self.worker).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                worker_failed = true;
-                eprintln!("Redis worker stopped unexpectedly: {error}");
-            }
+        }Ok(())
+    }.await;
+    let _ = stop_tx.send(true);
+    if worker_result.is_none() {
+        match timeout(Duration::from_secs(c.timeout_seconds + 8), &mut worker).await {
+            Ok(r) => worker_result = Some(r),
             Err(_) => {
-                worker_failed = true;
-                self.worker.abort();
-                let _ = (&mut self.worker).await;
-                eprintln!("Redis shutdown timeout; remaining delivery is unconfirmed.");
+                worker.abort();
+                worker_result = Some(worker.await);
             }
         }
-        let published = self.stats.published.load(Ordering::Relaxed);
-        let failed = self.stats.failed.load(Ordering::Relaxed);
-        let unconfirmed = self.enqueued.saturating_sub(published + failed);
-        eprintln!("Redis: published={published}, failed_or_unconfirmed={failed}, queued_unconfirmed={unconfirmed}, queue_dropped={}", self.dropped);
-        if worker_failed
-            || self.stats.unavailable.load(Ordering::Relaxed)
-            || failed + unconfirmed + self.dropped > 0
-        {
-            bail!(
-                "Redis forwarding was unavailable or incomplete; use the JSONL capture to recover"
-            );
+    }
+    let mut result = result;
+    while let Ok(row) = rx.try_recv() {
+        if let Err(err) = e.input(row, start.elapsed().as_millis() as u64) {
+            result = Err(err);
+            break;
         }
-        Ok(())
+    }
+    if let Some(r) = worker_result {
+        match r {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => result = Err(err),
+            Err(_) => {
+                result = Err(anyhow!(
+                    "Bluetooth worker interrupted before cleanup completed"
+                ))
+            }
+        }
+    }
+    let ms = start.elapsed().as_millis() as u64;
+    e.workout.tick(ms, &c);
+    let incomplete_frames = e.decoders.values().filter(|d| d.pending()).count();
+    let status = if incomplete_frames > 0 || result.is_err() || e.coverage_errors > 0 || e.gaps > 0
+    {
+        "partial"
+    } else {
+        "complete_for_declared_scope"
+    };
+    let mut summary = json!({"type":"workout_summary","run_id":e.rec.run_id,"demo":cli.demo,"capture_status":status,"raw_values":e.raw,"undecoded_values":e.unknown,"coverage_errors":e.coverage_errors,"incomplete_frames":incomplete_frames,"connection_gaps":e.gaps,"workout":e.workout,"protocol_validation":"Sunny SF-B023005DGY startup and telemetry observed; extended scenarios remain untested"});
+    let ch = c.workout_channel.clone();
+    if let Err(err) = e.emit(summary.clone(), ms, &ch) {
+        result = Err(err);
+        summary["capture_status"] = json!("partial");
+    }
+    if let Some(p) = e.publisher.take() {
+        summary["redis"] = p.finish().await;
+    }
+    if let Some(o) = e.output.take() {
+        summary["stdout_dropped_or_failed"] = json!(o.finish());
+    }
+    let dir = e.rec.dir.clone();
+    let save = e.rec.finish(summary);
+    drop(ui);
+    eprintln!("Saved capture and workout: {}", dir.display());
+    result.and(save)?;
+    if matches!(mode, ble::Mode::Pair | ble::Mode::Connect) && !cli.demo {
+        // Persist only the selection; do not persist any transient secret CLI overrides.
+        let mut saved = Config::load(config_path)?;
+        saved.device = selected.map(|a| a.to_string());
+        if c.adapter.is_some() {
+            saved.adapter = c.adapter;
+        }
+        config::write_private(config_path, toml::to_string_pretty(&saved)?.as_bytes())?;
+        eprintln!(
+            "Bike selection saved. {}",
+            if mode == ble::Mode::Pair {
+                "Bluetooth bond established."
+            } else {
+                "GATT connection verified; no bond requested."
+            }
+        );
+    }
+    Ok(())
+}
+async fn replay(c: &Config, path: &Path) -> Result<()> {
+    let mut decoders: HashMap<String, Decoder> = HashMap::new();
+    let mut publisher = publish::Publisher::new(c)?;
+    let mut epoch = 0;
+    for line in std::io::BufReader::new(fs::File::open(path)?).lines() {
+        let row: Value = serde_json::from_str(&line?)?;
+        if row["epoch"].as_u64().unwrap_or(epoch) != epoch {
+            epoch = row["epoch"].as_u64().unwrap();
+            decoders.clear();
+        }
+        if let Some(p) = &mut publisher {
+            let kind = row["type"].as_str().unwrap_or("");
+            if !matches!(kind, "decoded" | "metrics" | "workout_summary") {
+                p.replay(
+                    if matches!(kind, "connection" | "retry" | "coverage_gap" | "ready") {
+                        &c.status_channel
+                    } else {
+                        &c.raw_channel
+                    },
+                    &row,
+                )
+                .await?;
+            }
+        }
+        if matches!(
+            row["type"].as_str(),
+            Some("notification" | "gatt_value_update" | "read_result")
+        ) {
+            let uuid = row["characteristic_uuid"].as_str().unwrap_or("");
+            let key = format!("{}:{}:{uuid}", row["service_id"], row["characteristic_id"]);
+            let data = unhex(row["value_hex"].as_str().unwrap_or(""))?;
+            let ms = row["observed_elapsed_ms"]
+                .as_u64()
+                .or(row["elapsed_ms"].as_u64())
+                .unwrap_or(0);
+            match decoders.entry(key).or_default().decode_event(
+                uuid,
+                &data,
+                ms,
+                c,
+                row["sequence"].as_u64().unwrap_or(0),
+            ) {
+                Ok(Some(s)) => {
+                    let decoded = json!({"type":"decoded","run_id":row["run_id"],"source_event":row["sequence"],"sample":s});
+                    println!("{decoded}");
+                    if let Some(p) = &mut publisher {
+                        p.replay(&c.metrics_channel, &decoded).await?;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    eprintln!("Skipping malformed measurement at a recorded event");
+                }
+            }
+        }
+    }
+    if let Some(p) = publisher {
+        let stats = p.finish().await;
+        eprintln!("Redis replay: {stats}");
+        if stats["failed_or_unconfirmed"].as_u64().unwrap_or(0)
+            + stats["pending"].as_u64().unwrap_or(0)
+            + stats["queue_dropped"].as_u64().unwrap_or(0)
+            > 0
+        {
+            bail!("Redis replay incomplete; original local data is retained");
+        }
+    }
+    Ok(())
+}
+async fn app() -> Result<()> {
+    // Even --help / --version bootstrap a private default config on first start.
+    let default = config::init()?;
+    let cli = Cli::parse();
+    let path = cli.config.as_ref().unwrap_or(&default);
+    if cli.workout && !matches!(cli.command, None | Some(Command::Capture { .. })) {
+        bail!("--workout can be used alone or with capture");
+    }
+    if cli.demo && !matches!(cli.command, None | Some(Command::Capture { .. })) {
+        bail!("--demo can be used alone or with capture");
+    }
+    let mut c = Config::load(path)?;
+    c.apply(&cli.settings)?;
+    match &cli.command {
+        Some(Command::Config) => {
+            println!("{}", path.display());
+            Ok(())
+        }
+        Some(Command::Doctor) => ble::doctor(&c).await,
+        Some(Command::Scan) => {
+            tokio::select! {r=ble::scan(&c,cli.seconds.unwrap_or(15))=>r,_=shutdown_signal()=>Ok(())}
+        }
+        Some(Command::History) => {
+            let base = base_dir(&c, path);
+            let mut paths = fs::read_dir(base)?
+                .filter_map(|e| e.ok().map(|e| e.path().join("summary.json")))
+                .filter(|p| p.is_file())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for p in paths {
+                let v: Value = serde_json::from_slice(&fs::read(p)?)?;
+                println!("{v}");
+            }
+            Ok(())
+        }
+        Some(Command::Replay { path: input }) => replay(&c, input).await,
+        Some(Command::Forget { address: a }) => {
+            let a = address(&c, *a)?;
+            ble::manage(&c, a, true).await?;
+            let mut saved = Config::load(path)?;
+            if saved
+                .device
+                .as_deref()
+                .and_then(|s| s.parse::<bluer::Address>().ok())
+                == Some(a)
+            {
+                saved.device = None;
+                config::write_private(path, toml::to_string_pretty(&saved)?.as_bytes())?;
+            }
+            eprintln!("Bike bond removed.");
+            Ok(())
+        }
+        Some(Command::Disconnect { address: a }) => {
+            ble::manage(&c, address(&c, *a)?, false).await?;
+            eprintln!("Bike disconnected.");
+            Ok(())
+        }
+        Some(Command::Inspect { address }) => {
+            record(&cli, c, path, ble::Mode::Inspect, *address).await
+        }
+        Some(Command::Connect { address }) => {
+            record(&cli, c, path, ble::Mode::Connect, *address).await
+        }
+        Some(Command::Pair { address }) => record(&cli, c, path, ble::Mode::Pair, *address).await,
+        Some(Command::Capture { address }) => {
+            record(&cli, c, path, ble::Mode::Capture, *address).await
+        }
+        None => record(&cli, c, path, ble::Mode::Capture, None).await,
+    }
+}
+#[tokio::main]
+async fn main() {
+    if let Err(e) = app().await {
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
     }
 }
