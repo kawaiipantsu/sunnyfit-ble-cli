@@ -1,0 +1,14 @@
+/target/
+*.jsonl
+*.btsnoop
+*.log
+.env
+/dist/
+/captures/
+/private/
+*.zip
+*.deb
+*.buildinfo
+*.changes
+.env.*
+config.toml
