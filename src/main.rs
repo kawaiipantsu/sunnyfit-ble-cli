@@ -1,12 +1,15 @@
 mod ble;
 mod config;
+mod database_stats;
 mod export;
 mod food;
+mod live;
 mod metrics;
 mod profiles;
 mod publish;
 mod service;
 mod sinks;
+mod statistics;
 mod storage;
 mod strava;
 mod sunny;
@@ -69,6 +72,9 @@ impl Output {
 }
 struct Engine {
     rec: Option<Recorder>,
+    hub: Option<live::Hub>,
+    remote_sample: Option<(String, Option<u64>)>,
+    statistics: statistics::Tracker,
     run_id: String,
     sequence: u64,
     demo: bool,
@@ -95,6 +101,18 @@ impl Engine {
         row["timestamp_unix_ms"] = json!(storage::unix_ms());
         row["elapsed_ms"] = json!(ms);
         row["demo"] = json!(self.demo);
+        if matches!(row["type"].as_str(), Some("metrics" | "workout_summary")) {
+            row["statistics"] = serde_json::to_value(self.statistics.observe(
+                &self.workout,
+                &self.c,
+                ms,
+                row["timestamp_unix_ms"].as_i64().unwrap_or(0),
+                row["type"] == "workout_summary",
+            ))?;
+        }
+        if let Some(hub) = &self.hub {
+            hub.publish(&row, &self.workout);
+        }
         if let Some(rec) = &mut self.rec {
             rec.record(&row)?;
         }
@@ -128,6 +146,46 @@ impl Engine {
         Ok(row)
     }
     fn input(&mut self, row: Value, ms: u64) -> Result<()> {
+        if row["type"] == "service_event" {
+            let original = &row["event"];
+            let kind = original["type"].as_str().unwrap_or("");
+            if kind == "coverage_gap" {
+                self.gaps += 1;
+            }
+            if kind.ends_with("error") || original["outcome"] == "failed" {
+                self.coverage_errors += 1;
+            }
+            if matches!(
+                row["event"]["type"].as_str(),
+                Some("notification" | "gatt_value_update" | "read_result")
+            ) {
+                self.raw += 1;
+            }
+            let channel = self.c.raw_channel.clone();
+            self.emit(row, ms, &channel)?;
+            return Ok(());
+        }
+        if row["type"] == "service_snapshot" {
+            let snapshot: live::Snapshot = serde_json::from_value(row["snapshot"].clone())
+                .context("invalid live workout snapshot")?;
+            let key = (
+                snapshot.source_run_id.clone(),
+                snapshot.workout.source_event,
+            );
+            let fresh = self.remote_sample.as_ref() != Some(&key);
+            let previous_connection = self.workout.connection.clone();
+            self.workout
+                .stream_snapshot(&snapshot.workout, fresh, ms, self.sequence + 1, &self.c);
+            self.remote_sample = (snapshot.workout.connection == "ready").then_some(key);
+            if previous_connection != self.workout.connection {
+                let channel = self.c.status_channel.clone();
+                self.emit(json!({"type":"connection","state":self.workout.connection,"source":"service_stream"}), ms, &channel)?;
+            }
+            let channel = self.c.metrics_channel.clone();
+            self.emit(row, ms, &channel)?;
+            return Ok(());
+        }
+
         let epoch = row["epoch"].as_u64().unwrap_or(0);
         let role = row["device_role"].as_str().unwrap_or("bike").to_owned();
         let hr = role == "heart_rate";
@@ -155,6 +213,9 @@ impl Engine {
         }
 
         if kind == "connection" {
+            if !hr {
+                self.remote_sample = None;
+            }
             if hr {
                 if row["state"] != "ready" {
                     self.external_hr = None;
@@ -255,7 +316,7 @@ fn base_dir(c: &Config, config: &Path) -> PathBuf {
             .join("past-workouts")
     })
 }
-async fn demo(out: ble::Events, mut stop: watch::Receiver<bool>) -> Result<()> {
+async fn demo_stream(out: ble::Events, mut stop: watch::Receiver<bool>) -> Result<()> {
     out.state("ready").await?;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut n = 0u16;
@@ -275,7 +336,19 @@ async fn record(
     mode: ble::Mode,
     explicit: Option<bluer::Address>,
 ) -> Result<()> {
-    let selected = if cli.demo {
+    if let Some(explicit) = explicit {
+        c.device = Some(explicit.to_string());
+    }
+    let attachment = if cli.workout && !cli.demo {
+        live::probe(&c).await?
+    } else {
+        None
+    };
+    let attached = attachment.is_some();
+    let demo = cli.demo || attachment.as_ref().is_some_and(|a| a.first.demo);
+    let selected = if let Some(a) = &attachment {
+        a.first.device.as_deref().map(str::parse).transpose()?
+    } else if cli.demo {
         None
     } else {
         Some(address(&c, explicit)?)
@@ -286,9 +359,13 @@ async fn record(
     } else {
         None
     };
-    let publisher = publish::Publisher::new(&c)?;
+    let publisher = if attached {
+        None
+    } else {
+        publish::Publisher::new(&c)?
+    };
     let rec = if c.sinks.iter().any(|s| s == "local") {
-        Some(Recorder::new(&base_dir(&c, config_path), cli.demo)?)
+        Some(Recorder::new(&base_dir(&c, config_path), demo, attached)?)
     } else {
         None
     };
@@ -296,13 +373,22 @@ async fn record(
         .as_ref()
         .map(|r| r.run_id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let databases = sinks::Sink::start(&c)?;
+    let databases = if attached {
+        Vec::new()
+    } else {
+        sinks::Sink::start(&c)?
+    };
+    let hub = if c.systemd {
+        Some(live::Hub::start(&c, &run_id, demo)?)
+    } else {
+        None
+    };
     let mut training = if cli.workout {
         Some(training::Training::new(
             &c,
             config_path.parent().unwrap_or(Path::new(".")),
             &run_id,
-            cli.demo,
+            demo,
             &base_dir(&c, config_path),
         )?)
     } else {
@@ -310,9 +396,12 @@ async fn record(
     };
     let mut e = Engine {
         rec,
+        hub,
+        remote_sample: None,
+        statistics: statistics::Tracker::default(),
         run_id,
         sequence: 0,
-        demo: cli.demo,
+        demo,
         databases,
         external_hr: None,
         detected_profile: "raw".into(),
@@ -331,6 +420,10 @@ async fn record(
         coverage_errors: 0,
         gaps: 0,
     };
+    if attached {
+        e.workout.source = "service".into();
+        e.workout.connection = "attaching to service".into();
+    }
     let start = Instant::now();
     let (tx, mut rx) = mpsc::channel(4096);
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -340,7 +433,7 @@ async fn record(
         role: "bike".into(),
         start,
     };
-    let mut hr_worker = if !cli.demo && mode == ble::Mode::Capture {
+    let mut hr_worker = if !cli.demo && !attached && mode == ble::Mode::Capture {
         if let Some(hr) = &c.heart_rate_device {
             let mut hc = c.clone();
             hc.device = Some(hr.clone());
@@ -365,8 +458,10 @@ async fn record(
     } else {
         None
     };
-    let mut worker = if cli.demo {
-        tokio::spawn(demo(out, stop_rx))
+    let mut worker = if let Some(attachment) = attachment {
+        tokio::spawn(live::follow(c.clone(), attachment, out.tx, stop_rx))
+    } else if cli.demo {
+        tokio::spawn(demo_stream(out, stop_rx))
     } else {
         tokio::spawn(ble::run(c.clone(), selected.unwrap(), mode, stop_rx, out))
     };
@@ -389,7 +484,7 @@ async fn record(
                     if ms/1000>last_metrics{last_metrics=ms/1000;let ch=c.metrics_channel.clone();e.emit(json!({"type":"metrics","workout":e.workout}),ms,&ch)?;}
                     if let Some(ui)=&mut ui{
                         match ui.input()?{tui::Action::Quit=>break,tui::Action::Pause=>{e.workout.set_paused(!e.workout.paused);let ch=c.status_channel.clone();e.emit(json!({"type":"pause","paused":e.workout.paused}),ms,&ch)?;},tui::Action::Marker=>{let ch=c.status_channel.clone();e.emit(json!({"type":"marker","label":"user marker"}),ms,&ch)?;},tui::Action::Focus=>{if let Some(t)=&mut training {t.focus_paused = !t.focus_paused;}},tui::Action::ResetFocus=>{if let Some(t)=&mut training {t.focus_s=0.;}},tui::Action::None=>{}}
-                        if let Some(t)=&mut training {t.tick(&e.workout,&c,ms)?;ui.draw(&e.workout,&c,cli.demo,t)?;}
+                        if let Some(t)=&mut training {t.tick(&e.workout,&c,ms)?;ui.draw(&e.workout,&c,demo,t)?;}
                     }
                 }
             }
@@ -430,7 +525,7 @@ async fn record(
             Ok(Err(err)) => result = Err(err),
             Err(_) => {
                 result = Err(anyhow!(
-                    "Bluetooth worker interrupted before cleanup completed"
+                    "data source worker interrupted before cleanup completed"
                 ))
             }
         }
@@ -444,7 +539,7 @@ async fn record(
     } else {
         "complete_for_declared_scope"
     };
-    let mut summary = json!({"type":"workout_summary","run_id":e.run_id,"demo":cli.demo,"capture_status":status,"raw_values":e.raw,"undecoded_values":e.unknown,"coverage_errors":e.coverage_errors,"incomplete_frames":incomplete_frames,"connection_gaps":e.gaps,"workout":e.workout,"protocol_validation":"Sunny SF-B023005DGY startup and telemetry observed; extended scenarios remain untested"});
+    let mut summary = json!({"type":"workout_summary","run_id":e.run_id,"demo":demo,"capture_status":status,"raw_values":e.raw,"undecoded_values":e.unknown,"coverage_errors":e.coverage_errors,"incomplete_frames":incomplete_frames,"connection_gaps":e.gaps,"workout":e.workout,"source":if attached {"service_stream"}else{"bluetooth"},"protocol_validation":"Sunny SF-B023005DGY startup and telemetry observed; extended scenarios remain untested"});
     summary["food_equivalent"] = json!(food::message(e.workout.calories_kcal));
     if let Some(t) = &mut training {
         if let Err(err) = t.persist() {
@@ -516,12 +611,17 @@ async fn record(
 async fn replay(c: &Config, path: &Path) -> Result<()> {
     let mut decoders: HashMap<String, Decoder> = HashMap::new();
     let mut publisher = publish::Publisher::new(c)?;
-    let mut epoch = 0;
+    let mut epochs: HashMap<String, u64> = HashMap::new();
     for line in std::io::BufReader::new(fs::File::open(path)?).lines() {
-        let row: Value = serde_json::from_str(&line?)?;
-        if row["epoch"].as_u64().unwrap_or(epoch) != epoch {
-            epoch = row["epoch"].as_u64().unwrap();
-            decoders.clear();
+        let mut row: Value = serde_json::from_str(&line?)?;
+        if row["type"] == "service_event" {
+            row = row["event"].take();
+        }
+        let role = row["device_role"].as_str().unwrap_or("bike").to_owned();
+        let epoch = row["epoch"].as_u64().unwrap_or(0);
+        if epochs.get(&role) != Some(&epoch) {
+            decoders.retain(|key, _| !key.starts_with(&format!("{role}:")));
+            epochs.insert(role.clone(), epoch);
         }
         if let Some(p) = &mut publisher {
             let kind = row["type"].as_str().unwrap_or("");
@@ -542,7 +642,10 @@ async fn replay(c: &Config, path: &Path) -> Result<()> {
             Some("notification" | "gatt_value_update" | "read_result")
         ) {
             let uuid = row["characteristic_uuid"].as_str().unwrap_or("");
-            let key = format!("{}:{}:{uuid}", row["service_id"], row["characteristic_id"]);
+            let key = format!(
+                "{role}:{}:{}:{uuid}",
+                row["service_id"], row["characteristic_id"]
+            );
             let data = unhex(row["value_hex"].as_str().unwrap_or(""))?;
             let ms = row["observed_elapsed_ms"]
                 .as_u64()
@@ -659,6 +762,19 @@ async fn app() -> Result<()> {
         Some(Command::StravaAuth { exchange }) => {
             strava::auth(path.parent().unwrap_or(Path::new(".")), *exchange).await
         }
+        Some(Command::ResetStatistics {
+            database,
+            confirm_reset,
+        }) => {
+            if !confirm_reset {
+                bail!("this deletes statistics; stop the collector and pass --confirm-reset to proceed");
+            }
+            sinks::reset_statistics(&c, database).await?;
+            println!(
+                "Statistics reset to the aggregate schema. Session and device records preserved."
+            );
+            Ok(())
+        }
         Some(Command::Config) => {
             println!("{}", path.display());
             Ok(())
@@ -734,6 +850,9 @@ mod tests {
     fn heart_rate_disconnect_does_not_reset_bike() {
         let mut e = Engine {
             rec: None,
+            hub: None,
+            remote_sample: None,
+            statistics: statistics::Tracker::default(),
             run_id: "test".into(),
             sequence: 0,
             demo: false,

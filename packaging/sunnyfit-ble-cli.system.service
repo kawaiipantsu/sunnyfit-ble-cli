@@ -10,6 +10,8 @@ User=sunnyfit-ble-cli
 Group=sunnyfit-ble-cli
 StateDirectory=sunnyfit-ble-cli
 StateDirectoryMode=0700
+RuntimeDirectory=sunnyfit-ble-cli
+RuntimeDirectoryMode=0750
 WorkingDirectory=/var/lib/sunnyfit-ble-cli
 Environment=HOME=/var/lib/sunnyfit-ble-cli
 Environment=XDG_CONFIG_HOME=/var/lib/sunnyfit-ble-cli/.config

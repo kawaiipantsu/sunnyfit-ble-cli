@@ -7,7 +7,7 @@ to configure the repository, then install `sunnyfit-ble-cli` through APT.
 
 ## Build a package
 
-`make deb` builds `dist/sunnyfit-ble-cli_0.3.0-1_<architecture>.deb` and a SHA-256
+`make deb` builds `dist/sunnyfit-ble-cli_0.4.0-1_<architecture>.deb` and a SHA-256
 checksum. The package installs the executable, documentation, license, and an
 system service, example configuration, log rotation and legacy optional user unit.
 Installation does not enable or start the service. See [service setup](SERVICE.md).
@@ -76,7 +76,7 @@ A separate signature on each `.deb` is not required for that workflow.
 For an explicitly requested standalone detached signature, the helper also offers:
 
 ```sh
-python3 scripts/deploy.py --sign dist/sunnyfit-ble-cli_0.3.0-1_amd64.deb \
+python3 scripts/deploy.py --sign dist/sunnyfit-ble-cli_0.4.0-1_amd64.deb \
   --key-id YOUR_SIGNING_KEY_ID
 ```
 

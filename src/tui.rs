@@ -248,8 +248,12 @@ fn draw(
                 Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                if demo {
+                if demo && w.source == "service" {
+                    "DEMO · SERVICE STREAM  "
+                } else if demo {
                     "DEMO · SIMULATED  "
+                } else if w.source == "service" {
+                    "SERVICE STREAM  "
                 } else {
                     "DESK CYCLING CLUB  "
                 },

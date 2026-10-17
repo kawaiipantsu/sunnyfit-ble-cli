@@ -36,7 +36,7 @@ pub struct Recorder {
     worker: thread::JoinHandle<Result<()>>,
 }
 impl Recorder {
-    pub fn new(base: &Path, demo: bool) -> Result<Self> {
+    pub fn new(base: &Path, demo: bool, attached: bool) -> Result<Self> {
         private_dir(base)?;
         let run_id = uuid::Uuid::new_v4().to_string();
         let dir = base.join(format!("{}-{}", unix_ms(), run_id));
@@ -44,7 +44,7 @@ impl Recorder {
         write_private(
             &dir.join("manifest.json"),
             &serde_json::to_vec_pretty(
-                &json!({"schema":"sunnyfit.manifest.v1","run_id":run_id,"version":env!("CARGO_PKG_VERSION"),"model":"SF-B023005DGY","demo":demo,"status":"in_progress","scope":"BlueZ discovery, GATT inventory/reads and available notify/indicate sources","limits":["BlueZ property snapshots are not raw advertisements","fallback StartNotify can miss initial update; use btmon","disconnect gaps and upstream losses cannot be counted"],"durability":"bounded queue; flush and sync_data every second; final sync; crash tail may be lost"}),
+                &json!({"schema":"sunnyfit.manifest.v1","run_id":run_id,"version":env!("CARGO_PKG_VERSION"),"model":"SF-B023005DGY","demo":demo,"status":"in_progress","source":if attached {"service_stream"}else{"bluetooth"},"scope":if attached {"Live service snapshots and original events observed after attachment; earlier acquisition is stored by the collector"}else{"BlueZ discovery, GATT inventory/reads and available notify/indicate sources"},"limits":["BlueZ property snapshots are not raw advertisements","fallback StartNotify can miss initial update; use btmon","disconnect gaps and upstream losses cannot be counted"],"durability":"bounded queue; flush and sync_data every second; final sync; crash tail may be lost"}),
             )?,
         )?;
         let f = OpenOptions::new()

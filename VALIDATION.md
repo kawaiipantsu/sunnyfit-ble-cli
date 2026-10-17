@@ -1,8 +1,38 @@
 # Validation record
 
-Checked 2026-10-17 on Debian 13, x86_64. The code is version 0.3.0.
+Checked 2026-10-17 on Debian 13, x86_64. The code is version 0.4.0.
 Private addresses, identities, credentials, raw captures and APK files are not
 included in Git or the Debian package.
+
+## Version 0.4 checks
+
+- Rustfmt, Clippy with warnings denied, and 32 Rust tests pass. New tests cover
+  live socket permissions/ownership, local workout baselines and HR freshness,
+  automatic five-minute trip boundaries, pause/disconnect handling, UTC calendar
+  boundaries, materialized averages/totals, repeated-write idempotence and explicit
+  statistics reset while retaining legacy sessions/devices.
+- All three Python suites pass. The new real-process stream suite exercises
+  automatic/required/direct source selection, two concurrent PTY viewers,
+  independent pause and history, no duplicate database writes, raw-event replay,
+  collector restart/reattachment and standalone operation. Fixtures use isolated
+  sockets/configuration and synthetic telemetry without touching physical BLE.
+- The installed TUI attached to the physical collector, displayed SERVICE STREAM
+  and received five fresh, ready metric snapshots during a six-second test.
+  Closing it left the collector PID unchanged and created no duplicate sink.
+  A separate service-group account could read the socket; an unrelated local
+  account was denied. This confirms live sharing, not a new speed calibration.
+- The requested raw-event statistics reset was performed on MariaDB 10.11.
+  Session/device records were retained. Schema 2 has no raw payload column in
+  statistics. A synthetic run wrote to actual MariaDB, remote Redis and SQLite
+  concurrently with zero pending records, retries or drops. Database totals
+  matched the run's captured distance and active time, with one started/completed
+  trip and NULL heart rate. MySQL-backed CSV, TCX and FIT exports succeeded.
+- The Debian system unit creates its runtime socket directory. Installation
+  preserves private configuration; this host's explicitly enabled service
+  continues using MySQL and Redis. New installations remain disabled by default.
+- Database exports now use minute aggregates; local recording export remains at
+  one-second resolution. Calendar rollups use UTC. Automatic idle boundaries are
+  fixture-tested; no physical heart-rate sensor was available.
 
 ## Version 0.3 checks
 

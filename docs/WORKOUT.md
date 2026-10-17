@@ -5,6 +5,14 @@ sunnyfit-ble-cli --workout --goal-minutes 25 --ghost latest --route denmark
 sunnyfit-ble-cli --demo --workout --met 3
 ```
 
+`--workout` automatically shares the local system service's stream when it is
+running, displaying **SERVICE STREAM**. Without the service it owns Bluetooth
+itself. Attached workouts keep independent timers, distance, training and local
+history; pause/quit leave the collector and its storage destinations running.
+Service restarts trigger reattachment without a second Bluetooth connection.
+See [service access and source selection](SERVICE.md#sharing-the-service-with-a-workout)
+for group permissions, `--workout-source` and custom socket paths.
+
 Tab / Shift-Tab switch views; 1–9 jump directly. Space or `p` pauses local totals
 and training; `m` marks the capture; `q`, Escape or Ctrl-C saves and exits.
 The interface renders on stderr, leaving stdout available for requested JSON.

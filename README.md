@@ -29,6 +29,7 @@ Send live telemetry to MySQL, Redis and SQLite—or turn your terminal into a ti
 - [Architecture](#architecture)
 - [Build from source](#build-from-source)
 - [Compatibility and verification](#compatibility-and-verification)
+- [Statistics for websites](docs/STATISTICS.md)
 - [Documentation](#documentation)
 - [Contribute](#contribute)
 - [License](#license)
@@ -42,9 +43,10 @@ Send live telemetry to MySQL, Redis and SQLite—or turn your terminal into a ti
 | **Motivation** | Persistent achievements, XP, daily challenges and playful food-energy comparisons from an editable JSON catalogue. |
 | **Telemetry** | Decodes the SF-B023005DGY's Sunny protocol, including fragmented packets, operating status and odometer. Standard FTMS and CSC decoders are also included. |
 | **History** | Saves raw events, decoded measurements and workout summaries locally. Replay recordings without the bike. |
-| **Storage** | Concurrent MySQL/MariaDB, SQLite and Redis Pub/Sub destinations, with independent queues and reconnect handling. |
+| **Storage** | Concurrent MySQL/MariaDB, SQLite and Redis Pub/Sub destinations. Precomputed chart buckets, daily/lifetime totals and automatic trips ending after five minutes idle. |
 | **Heart rate** | Independent standard Bluetooth HRS sensor connection, including compatible Polar, Garmin, Magene and iGPSport models; fixture-validated. |
 | **Export** | Indoor cycling FIT, TCX and CSV, plus explicit optional Strava OAuth/upload. |
+| **Shared connection** | `--workout` automatically attaches to a running system service; without one, it connects to Bluetooth directly. Multiple viewers keep independent workout sessions. |
 | **Headless operation** | Quiet capture by default, simple debug feedback on request, or line-by-line raw JSON with `--debug-stdout -v`. |
 | **Debian** | Makefile builds, a `.deb` package, and an installed system service that stays disabled until configured/enabled. Packages are distributed through [apt.thugs.red](https://apt.thugs.red). |
 
@@ -99,7 +101,10 @@ sunnyfit-ble-cli --workout
 ```
 
 Choose the adapter shown by `doctor`; `hci1` is an example. `connect` verifies GATT
-access and saves the bike and adapter for subsequent runs.
+access and saves the bike and adapter for subsequent runs. If the system service
+is already configured and collecting, simply run `--workout`; it shares the
+service stream. See [service permissions](docs/SERVICE.md#sharing-the-service-with-a-workout)
+for access from a regular login account.
 
 **The tested SF-B023005DGY streams without a Bluetooth bond.** It rejected native
 pairing with `AuthenticationFailed`, so use `connect` for this model. The `pair`
@@ -212,7 +217,10 @@ flowchart LR
     Raw --> Redis[Redis Pub/Sub]
     Workout --> Redis
     Sensor[Bluetooth heart-rate sensor] --> BlueZ
-    Raw --> DB[MySQL / MariaDB / SQLite]
+    Workout --> Aggregates[Chart buckets and accumulated statistics]
+    Aggregates --> DB[MySQL / MariaDB / SQLite]
+    Workout --> Stream[Local service stream]
+    Stream --> TUI
     Workout --> DB
     Files --> Export[FIT / TCX / CSV / optional Strava]
     Redis --> Apps[Your applications / WebSocket bridge]
@@ -268,6 +276,7 @@ Protocol research and observed limitations are documented in [PROTOCOL.md](docs/
 | --- | --- |
 | [CLI reference](docs/USAGE.md) | Commands, config, Redis, capture, replay and background service |
 | [Workout app](docs/WORKOUT.md) | Tabs, intervals, ghosts, games, routes, desk mode and food comparisons |
+| [Website statistics](docs/STATISTICS.md) | Precomputed totals, graph queries, automatic trips and schema migration |
 | [Service and storage](docs/SERVICE.md) | systemd, MySQL/MariaDB, SQLite, Redis and delivery guarantees |
 | [Devices and profiles](docs/DEVICES.md) | Heart-rate compatibility, discovery wizard and contributor fixtures |
 | [Export and Strava](docs/EXPORT.md) | FIT, TCX, CSV and explicit OAuth uploads |

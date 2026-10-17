@@ -11,6 +11,9 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub systemd: bool,
+    pub stream_socket: PathBuf,
+    pub workout_source: String,
+    pub trip_idle_seconds: u64,
     pub sinks: Vec<String>,
     pub mysql_url: Option<String>,
     pub sqlite_path: PathBuf,
@@ -65,6 +68,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             systemd: false,
+            stream_socket: PathBuf::from(crate::live::DEFAULT_SOCKET),
+            workout_source: "auto".into(),
+            trip_idle_seconds: 300,
             sinks: vec!["local".into(), "redis".into()],
             mysql_url: None,
             sqlite_path: PathBuf::from("/var/lib/sunnyfit-ble-cli/workouts.sqlite3"),
@@ -190,11 +196,32 @@ pub enum Command {
         #[arg(long)]
         exchange: bool,
     },
+    /// Delete only the selected statistics table and create the current aggregate schema.
+    ResetStatistics {
+        #[arg(long, default_value = "sqlite", value_parser = ["mysql", "sqlite"])]
+        database: String,
+        #[arg(long)]
+        confirm_reset: bool,
+    },
     /// Print the config file location (never its secret values).
     Config,
 }
 #[derive(Args, Default)]
 pub struct Overrides {
+    /// Local read-only service stream socket.
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_STREAM_SOCKET",
+        hide_env_values = true
+    )]
+    pub stream_socket: Option<PathBuf>,
+    /// Workout input: auto attaches to the service, otherwise owns Bluetooth.
+    #[arg(long, global=true, env="SUNNY_WORKOUT_SOURCE", value_parser=["auto","service","direct"])]
+    pub workout_source: Option<String>,
+    /// End an automatic trip after this many idle seconds; 0 disables trip detection.
+    #[arg(long, global = true, env = "SUNNY_TRIP_IDLE_SECONDS")]
+    pub trip_idle_seconds: Option<u64>,
     /// Headless connector: external sinks and a service log, without workout history/UI.
     #[arg(long, global=true, env="SUNNY_SYSTEMD", num_args=0..=1, default_missing_value="true")]
     pub systemd: Option<bool>,
@@ -372,6 +399,9 @@ impl Config {
         macro_rules! opt { ($($f:ident),*) => { $(if let Some(v)=&o.$f { self.$f=Some(v.clone()); })* } }
         set!(
             systemd,
+            stream_socket,
+            workout_source,
+            trip_idle_seconds,
             sinks,
             sqlite_path,
             database_queue,
@@ -424,6 +454,9 @@ impl Config {
         if let Some(address) = o.heart_rate_device {
             self.heart_rate_device = Some(address.to_string());
         }
+        if !["auto", "service", "direct"].contains(&self.workout_source.as_str()) {
+            bail!("workout-source must be auto, service or direct");
+        }
         for sink in &self.sinks {
             if !["local", "redis", "mysql", "sqlite"].contains(&sink.as_str()) {
                 bail!("sinks must be local, redis, mysql, or sqlite");
@@ -450,6 +483,9 @@ impl Config {
             })
         {
             bail!("systemd mode requires an external sink; use --sinks sqlite, mysql, or configured redis");
+        }
+        if self.trip_idle_seconds > 86400 {
+            bail!("trip-idle-seconds must be at most 86400 (or 0 to disable)");
         }
         if self.database_queue == 0
             || self.daily_goal_minutes == 0

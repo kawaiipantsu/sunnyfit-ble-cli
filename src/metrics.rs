@@ -270,8 +270,10 @@ pub fn heart_rate(data: &[u8]) -> Result<Sample> {
     );
     Ok(s)
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Workout {
+    #[serde(default)]
+    pub source: String,
     pub elapsed_s: f64,
     pub active_s: f64,
     pub paused: bool,
@@ -302,6 +304,7 @@ pub struct Workout {
 impl Default for Workout {
     fn default() -> Self {
         Self {
+            source: "bluetooth".into(),
             elapsed_s: 0.,
             active_s: 0.,
             paused: false,
@@ -326,6 +329,37 @@ impl Default for Workout {
     }
 }
 impl Workout {
+    /// Apply a service snapshot without importing its elapsed time or cumulative totals.
+    pub fn stream_snapshot(
+        &mut self,
+        remote: &Self,
+        new_sample: bool,
+        now: u64,
+        event: u64,
+        c: &Config,
+    ) {
+        self.source = "service".into();
+        if self.connection != remote.connection {
+            self.connection(&remote.connection);
+        }
+        if remote.connection != "ready" {
+            return;
+        }
+        // Snapshot absence is authoritative: do not extend upstream freshness.
+        macro_rules! clear {($($field:ident),*)=>{$(if remote.current.$field.is_none(){self.current.$field=None;self.field_times.remove(stringify!($field));})*}}
+        clear!(speed_kmh, cadence_rpm, power_w, heart_rate_bpm, resistance);
+        if new_sample {
+            let mut sample = remote.current.clone();
+            // Service totals already account for resets, reconnects and missing counters.
+            // Use their deltas with a new local baseline for each attached workout.
+            sample.distance_m = remote.distance_m;
+            sample.calories_kcal = remote.calories_kcal;
+            self.ingest(sample, now, event, c);
+        }
+        // Heart-rate notifications have their own cadence, independent of bike frames.
+        self.external_heart_rate(&remote.current, now);
+        self.stale = self.current.speed_kmh.is_none() && self.current.cadence_rpm.is_none();
+    }
     pub fn external_heart_rate(&mut self, sample: &Sample, now: u64) {
         self.current.heart_rate_bpm = sample.heart_rate_bpm;
         self.field_times.insert("heart_rate_bpm".into(), now);
@@ -468,6 +502,83 @@ mod tests {
     use super::*;
     const FTMS: &str = "00002ad2-0000-1000-8000-00805f9b34fb";
     const CSC: &str = "00002a5b-0000-1000-8000-00805f9b34fb";
+    #[test]
+    fn attached_workout_has_local_counters_pause_and_reconnect_baselines() {
+        let c = Config::default();
+        let mut remote = Workout {
+            elapsed_s: 3600.,
+            active_s: 1800.,
+            distance_m: Some(5000.),
+            calories_kcal: Some(200.),
+            connection: "ready".into(),
+            current: Sample {
+                speed_kmh: Some(18.),
+                cadence_rpm: Some(60.),
+                distance_m: Some(9000.),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut local = Workout::default();
+        local.stream_snapshot(&remote, true, 0, 1, &c);
+        assert_eq!(local.elapsed_s, 0.);
+        assert_eq!(local.active_s, 0.);
+        assert_eq!(local.distance_m, Some(0.));
+        assert_eq!(local.calories_kcal, Some(0.));
+        remote.distance_m = Some(5010.);
+        remote.calories_kcal = Some(201.);
+        local.stream_snapshot(&remote, true, 1000, 2, &c);
+        assert_eq!(local.distance_m, Some(10.));
+        assert_eq!(local.calories_kcal, Some(1.));
+        assert_eq!(local.active_s, 1.);
+        local.set_paused(true);
+        remote.distance_m = Some(5100.);
+        local.stream_snapshot(&remote, true, 2000, 3, &c);
+        assert_eq!(local.distance_m, Some(10.));
+        assert_eq!(local.active_s, 1.);
+        local.set_paused(false);
+        local.stream_snapshot(&remote, true, 2000, 4, &c);
+        remote.distance_m = Some(5110.);
+        local.stream_snapshot(&remote, true, 3000, 5, &c);
+        assert_eq!(local.distance_m, Some(20.));
+        local.connection("waiting for service");
+        local.tick(10000, &c);
+        remote.distance_m = Some(10.); // Collector restarted; no catch-up distance.
+        local.stream_snapshot(&remote, true, 10000, 6, &c);
+        assert_eq!(local.distance_m, Some(20.));
+        assert_eq!(local.active_s, 2.);
+        remote.distance_m = Some(15.);
+        local.stream_snapshot(&remote, true, 11000, 7, &c);
+        assert_eq!(local.distance_m, Some(25.));
+        assert_eq!(local.elapsed_s, 11.);
+    }
+    #[test]
+    fn service_staleness_is_authoritative_and_heart_rate_updates_independently() {
+        let c = Config::default();
+        let mut remote = Workout {
+            connection: "ready".into(),
+            current: Sample {
+                speed_kmh: Some(12.),
+                cadence_rpm: Some(50.),
+                heart_rate_bpm: Some(80.),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut local = Workout::default();
+        local.stream_snapshot(&remote, true, 0, 1, &c);
+        remote.current.heart_rate_bpm = Some(90.);
+        local.stream_snapshot(&remote, false, 1000, 2, &c);
+        assert_eq!(local.current.heart_rate_bpm, Some(90.));
+        assert_eq!(local.sample_count, 1);
+        remote.current = Sample::default();
+        local.stream_snapshot(&remote, false, 2000, 3, &c);
+        assert!(local.stale);
+        assert_eq!(local.current.heart_rate_bpm, None);
+        let active = local.active_s;
+        local.tick(3000, &c);
+        assert_eq!(local.active_s, active);
+    }
     #[test]
     fn ftms_optional_fields_and_truncation() {
         let c = Config::default();

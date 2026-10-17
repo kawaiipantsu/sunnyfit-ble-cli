@@ -25,7 +25,7 @@ def install(src, dest, mode=0o644):
 install('target/release/sunnyfit-ble-cli', 'usr/bin/sunnyfit-ble-cli', 0o755)
 for f in ['README.md', 'LICENSE', 'VALIDATION.md', 'CONTRIBUTING.md',
           'docs/PROTOCOL.md', 'docs/USAGE.md', 'docs/DEPLOYMENT.md',
-          'docs/SERVICE.md', 'docs/WORKOUT.md', 'docs/DEVICES.md', 'docs/EXPORT.md',
+          'docs/STATISTICS.md', 'docs/SERVICE.md', 'docs/WORKOUT.md', 'docs/DEVICES.md', 'docs/EXPORT.md',
           'docs/android-analysis.json', 'assets/sunnyfit_banner.png',
           'assets/screenshots/workout-demo.png', 'assets/screenshots/town-demo.png']:
     install(f, 'usr/share/doc/sunnyfit-ble-cli/' + f)

@@ -6,14 +6,14 @@ BIN=Path(os.environ.get('SUNNY_TEST_BINARY','target/debug/sunnyfit-ble-cli')).re
 with tempfile.TemporaryDirectory(prefix='sunnyfit-features-') as temp:
  root=Path(temp);env={k:v for k,v in os.environ.items() if not k.startswith('SUNNY_')};env['XDG_CONFIG_HOME']=str(root/'config')
  def run(*args,**kw):return subprocess.run([str(BIN),*map(str,args)],env=env,capture_output=True,text=True,timeout=25,**kw)
- p=run('--demo','--systemd','--sinks','sqlite','--sqlite-path',root/'state.sqlite','--log-file',root/'service.log','--debug-stdout','-v','--seconds','3')
+ p=run('--demo','--systemd','--sinks','sqlite','--sqlite-path',root/'state.sqlite','--log-file',root/'service.log','--stream-socket',root/'stream.sock','--debug-stdout','-v','--seconds','3')
  assert p.returncode==0,p.stderr
  assert not p.stdout and not p.stderr
  assert not (root/'config/sunnyfit-ble-cli/past-workouts').exists()
  db=sqlite3.connect(root/'state.sqlite')
  assert {r[0]for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}=={'workout-sessions','workout-statistics','workout-devices'}
- session=db.execute('SELECT session_id,status FROM `workout-sessions`').fetchone();assert session[1]=='finished'
- assert db.execute('SELECT count(*) FROM `workout-statistics` WHERE heart_rate_bpm IS NOT NULL').fetchone()[0]==0
+ session=db.execute("SELECT session_id,status FROM `workout-sessions` WHERE session_kind='collector'").fetchone();assert session[1]=='finished'
+ assert db.execute('SELECT count(*) FROM `workout-statistics` WHERE heart_rate_average_bpm IS NOT NULL').fetchone()[0]==0
  assert any(json.loads(x)['event']=='stopped'for x in (root/'service.log').read_text().splitlines())
  p=run('--sqlite-path',root/'state.sqlite','sessions');assert p.returncode==0,p.stderr
  for fmt in ['csv','tcx','fit']:
@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='sunnyfit-features-') as temp:
  p=subprocess.Popen([str(BIN),'--demo','--seconds','5','--sinks','local,sqlite','--sqlite-path',str(blocked),'--output-dir',str(root/'recovery')],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  time.sleep(1.3);blocked.rmdir();stdout,stderr=p.communicate(timeout=20);assert p.returncode==0,stderr
  summary=json.loads(next((root/'recovery').glob('*/summary.json')).read_text());stats=summary['databases'][0]
- assert stats['written']>10 and stats['pending']==0 and stats['retries']>0,stats
+ assert stats['written']>=3 and stats['pending']==0 and stats['retries']>0,stats
  # User-editable food catalogue is used for the session summary.
  food=root/'food.json';food.write_text(json.dumps({'foods':[{'name':'a mooncake','portion':'1 small mooncake','kcal':200}]}))
  p=run('--demo','--seconds','2','--met','3','--food-file',food,'--output-dir',root/'food-test');assert p.returncode==0,p.stderr

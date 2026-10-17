@@ -23,6 +23,7 @@ test: ## Run decoder and application tests
 integration: build ## Exercise CLI, TUI, signals, replay and isolated Redis
 	python3 tests/integration.py
 	python3 tests/features.py
+	python3 tests/live-stream.py
 check: lint test integration ## Run required source checks
 
 deb: release ## Build a Debian package in dist/

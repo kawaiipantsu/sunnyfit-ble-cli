@@ -22,7 +22,7 @@ make                 # list targets
 make build
 make check           # format, Clippy, unit and isolated integration tests
 make deb             # optimized executable and dist/*.deb
-sudo apt install ./dist/sunnyfit-ble-cli_0.3.0-1_amd64.deb
+sudo apt install ./dist/sunnyfit-ble-cli_0.4.0-1_amd64.deb
 ```
 
 The Realtek USB adapter already uses the kernel's `btusb`/`btrtl` drivers. The
@@ -231,9 +231,13 @@ sudo systemctl enable --now sunnyfit-ble-cli
 
 See [service and storage](SERVICE.md) for multiple sinks, permissions, database
 schema and logs. The legacy user service remains available for per-user capture;
-use only one instance per bike.
+use only one Bluetooth collector per bike. `--workout` automatically shares the
+system service stream when available and connects directly when no service is
+running. Attached workouts leave service storage and acquisition running.
 
-New in 0.3: [workout views and training](WORKOUT.md), [heart rate and profiles](DEVICES.md),
+New in 0.4: automatic service sharing and [precomputed statistics/trips](STATISTICS.md).
+
+Also available: [workout views and training](WORKOUT.md), [heart rate and profiles](DEVICES.md),
 and [FIT/TCX/CSV and Strava](EXPORT.md). Run `--help` for every config/ENV override.
 
 

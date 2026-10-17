@@ -1,5 +1,11 @@
 # Indoor cycling exports and Strava
 
+Database exports use the stored **minute aggregates** from schema 2. Speed,
+cadence, heart rate and power are active-time weighted averages, with cumulative
+distance and active time reconstructed from bucket contributions. Local capture
+exports retain one-second measurements. A statistics reset removes the old
+database timeline even though its session summary remains.
+
 ```sh
 sunnyfit-ble-cli export /path/to/run --format csv --output ride.csv
 sunnyfit-ble-cli export /path/to/events.jsonl --format tcx --output ride.tcx
