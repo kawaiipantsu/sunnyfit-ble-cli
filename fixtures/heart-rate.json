@@ -1,0 +1,12 @@
+[
+ {"name":"HRS uint8 typical chest strap", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"0048","expected":{"heart_rate_bpm":72.0}}]},
+ {"name":"HRS uint16", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"012c01","expected":{"heart_rate_bpm":300.0}}]},
+ {"name":"contact lost", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"0448","expected":{"heart_rate_bpm":null}}]},
+ {"name":"contact energy RR", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"1e480a0000040002","expected":{"heart_rate_bpm":72.0,"extra":{"sensor_contact":true,"heart_rate_energy_kj":10,"rr_intervals_s":[1.0,0.5]}}}]},
+ {"name":"zero unavailable", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"0000","expected":{"heart_rate_bpm":null}}]},
+ {"name":"truncated16", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"0148","error":true}]},
+ {"name":"oddRR", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"104800","error":true}]},
+ {"name":"reserved", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"e048","error":true}]},
+ {"name":"truncated energy", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"084801","error":true}]},
+ {"name":"extra bytes", "frames":[{"uuid":"00002a37-0000-1000-8000-00805f9b34fb","hex":"004800","error":true}]}
+]

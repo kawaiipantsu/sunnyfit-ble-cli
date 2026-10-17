@@ -1,35 +1,47 @@
 # Validation record
 
-Checked 2026-10-17 on Debian 13, x86_64. The code is version 0.2.0.
+Checked 2026-10-17 on Debian 13, x86_64. The code is version 0.3.0.
 Private addresses, identities, credentials, raw captures and APK files are not
 included in Git or the Debian package.
 
-## Build and automated checks
+## Version 0.3 checks
 
-- Rust 1.94.1 built the debug and optimized release executables using Cargo.lock.
-  Rust 1.90 is the declared minimum; this revision was not built with that compiler.
-- `make check`: rustfmt, Clippy with warnings denied, 12 Rust tests and the Python
-  integration suite. The tests exercise actual executable processes.
-- Protocol tests cover every fragment boundary of a captured Sunny motion frame,
-  checksum/TLV corruption, partial-frame expiry, unknown tags, concatenated frames,
-  the keep-counter startup flag, standard FTMS fields and truncation, CSC rollover,
-  counter resets, silence, disconnects and pause boundaries.
-- Integration covers first-run config creation and mode 0600, argument validation,
-  secret redaction, all four verbose/debug-stdout combinations, deterministic
-  record/replay decoding, SIGTERM cleanup, and the workout TUI in a pseudo-terminal
-  with pause, marker and quit input. Alternate-screen restoration and clean JSON
-  stdout are checked.
-- An isolated localhost Redis instance verifies all four configurable channels,
-  recovery when Redis is unavailable at startup, and offline replay with a
-  one-record publishing queue. This does not exercise the user's production Redis
-  or a downstream WebSocket consumer.
-- `make deb` builds an amd64 package and SHA-256 checksum. Runtime dependencies are
-  derived from the actual ELF. A staged extracted release executable passed a
-  simulated capture smoke test. The package was installed locally, and the full
-  Python integration suite also passed against `/usr/bin/sunnyfit-ble-cli`,
-  including Redis replay with a one-record queue. The installed `doctor` command
-  confirmed firmware presence and both powered adapters. The optional user service
-  is not enabled by the package.
+- Rustfmt and Clippy with warnings denied pass. The 24 Rust tests cover the
+  original Sunny/FTMS/CSC parsing and freshness behavior, HRS flags/contact/RR
+  parsing, independent sensor reconnect state, custom profile bounds, interval
+  transitions, ghost interpolation, progress merging/idempotence, demo isolation,
+  SQLite upserts and NULLs, export omission of unavailable fields, redacted HTTP
+  errors and rendering all nine TUI views at 64×24 and 124×36.
+- Both Python integration suites passed against the debug executable and the
+  installed `/usr/bin/sunnyfit-ble-cli`. They exercise default config permissions,
+  secret redaction, stdout modes, record/replay, SIGTERM, actual PTY keyboard
+  navigation, clean JSON stdout, isolated Redis recovery, SQLite service mode,
+  all three table names, database recovery, exports and a custom food catalogue.
+- Actual MySQL/MariaDB and remote Redis were tested concurrently with SQLite.
+  All four Redis channels received events. Database queues drained without
+  drops/retries. MySQL readback and database-sourced CSV/TCX/FIT exports passed.
+  Synthetic validation sessions are explicitly marked `demo` in the database.
+- Garmin's official Python FIT SDK independently checked the generated FIT file's
+  CRC/integrity and decoded its indoor cycling session and records. Absent heart
+  rate and GPS remained absent. Exported TCX passed Garmin's official v2 XSD.
+- The Debian package contains the system unit, config/environment conffiles,
+  logrotate policy, profiles, fixtures, interval plan and food catalogue.
+  The environment conffile is mode 0600. Installation was observed leaving the
+  service disabled. It was subsequently explicitly enabled on this host at the
+  owner's request, using its dedicated account and MySQL plus Redis sinks.
+- `systemd-analyze verify` accepted the new unit. The installed service connected
+  to the physical bike and delivered observed movement to both destinations:
+  Redis showed 3.47–21.09 km/h and 13–79 rpm during one 20-second observation;
+  MySQL subsequently held 222 m and 44.7 active seconds, with 72 saved metric
+  snapshots at readback. A concurrent health check showed 140 writes/publishes
+  per destination and zero pending records, queue drops or delivery failures.
+  These values describe different observation windows, not a display calibration.
+- README screenshots were captured from the actual demo TUI through a PTY.
+  No personal bike identifiers or configuration are present in the images.
+
+Rust 1.94.1 built this revision; the declared minimum 1.90 was not separately
+validated. Existing physical protocol evidence below was gathered for 0.2 and
+is retained alongside the new service check.
 
 ## Physical bike and adapter
 
@@ -88,7 +100,12 @@ reception or identical ordering for every acquisition path.
 - Power, electronic resistance and battery were not supplied by this bike's
   observed telemetry. Heart rate was zero/unavailable. Unknown fields are retained
   without invented interpretations; calories are device estimates.
-- File storage, stdout and Redis have bounded queues and explicit failure/loss
+- No physical heart-rate sensor was available: Polar, Garmin, Magene and iGPSport
+  compatibility is based on their Bluetooth HRS support and synthetic protocol
+  fixtures. Vendor-specific features and actual pairing/reconnect behavior still
+  need hardware tests. Live Strava OAuth/upload was not exercised; request failure
+  handling and export generation were tested.
+- File storage, stdout, databases and Redis have bounded queues and explicit failure/loss
   accounting. Redis Pub/Sub has no retention guarantee. Crash/power-loss durability,
   disk exhaustion and saturation at extreme notification rates were not stress-tested.
 - The configured APT API and token were verified with `GET <API URL>/suites`
@@ -96,7 +113,7 @@ reception or identical ordering for every acquisition path.
   response and separate documentation access failures do not mean the API is
   unavailable. The server upload/stage/publish schema was subsequently located in its local
   canonical documentation; the current client helper implements readiness checks
-  and optional signing only. No publication was performed during this validation. The signing helper follows the accessible signing
+  and optional signing only. No APT publication of version 0.3 was performed during this validation. The signing helper follows the accessible signing
   OpenAPI; its remote execution remains untested.
 - At the time of the hardware validation, Git was local. GitHub publication was
   subsequently requested by the owner. Commits use the existing global identity;

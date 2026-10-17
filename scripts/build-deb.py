@@ -25,10 +25,24 @@ def install(src, dest, mode=0o644):
 install('target/release/sunnyfit-ble-cli', 'usr/bin/sunnyfit-ble-cli', 0o755)
 for f in ['README.md', 'LICENSE', 'VALIDATION.md', 'CONTRIBUTING.md',
           'docs/PROTOCOL.md', 'docs/USAGE.md', 'docs/DEPLOYMENT.md',
+          'docs/SERVICE.md', 'docs/WORKOUT.md', 'docs/DEVICES.md', 'docs/EXPORT.md',
           'docs/android-analysis.json', 'assets/sunnyfit_banner.png',
-          'assets/screenshots/workout-demo.png']:
+          'assets/screenshots/workout-demo.png', 'assets/screenshots/town-demo.png']:
     install(f, 'usr/share/doc/sunnyfit-ble-cli/' + f)
 install('packaging/sunnyfit-ble-cli.service', 'usr/lib/systemd/user/sunnyfit-ble-cli.service')
+install('packaging/sunnyfit-ble-cli.system.service', 'usr/lib/systemd/system/sunnyfit-ble-cli.service')
+install('packaging/service-config.toml', 'etc/sunnyfit-ble-cli/config.toml')
+install('packaging/service.env', 'etc/default/sunnyfit-ble-cli', 0o600)
+install('packaging/logrotate', 'etc/logrotate.d/sunnyfit-ble-cli')
+for script in ['postinst', 'prerm', 'postrm']:
+    install('packaging/' + script, 'DEBIAN/' + script, 0o755)
+(stage / 'DEBIAN/conffiles').write_text('/etc/sunnyfit-ble-cli/config.toml\n/etc/default/sunnyfit-ble-cli\n/etc/logrotate.d/sunnyfit-ble-cli\n')
+install('callories-burn.json', 'usr/share/sunnyfit-ble-cli/callories-burn.json')
+for directory in ['profiles', 'fixtures', 'workouts']:
+    for source in sorted(Path(directory).rglob('*')):
+        if source.is_file():
+            install(source, 'usr/share/sunnyfit-ble-cli/' + str(source))
+
 # Resolve required runtime libraries from the actual binary.
 shlib = root / 'dist' / 'shlibdeps'
 (shlib / 'debian').mkdir(parents=True, exist_ok=True)
@@ -49,10 +63,11 @@ Section: utils
 Priority: optional
 Architecture: {arch}
 Maintainer: {maintainer}
-Depends: bluez, {deps}
-Recommends: firmware-realtek
+Depends: bluez, adduser, {deps}
+Recommends: firmware-realtek, logrotate
 Description: Bluetooth workout recorder and terminal dashboard
- Records SunnyFit BLE data, manages workouts, and publishes to Redis.
+ Records BLE fitness data, provides a workout TUI, and delivers to
+ MySQL/MariaDB, SQLite and Redis. Includes an opt-in system service.
 Includes unknown raw payloads and offline replay for protocol investigation.
 '''.replace('\nIncludes', '\n Includes')
 (stage / 'DEBIAN/control').write_text(control)

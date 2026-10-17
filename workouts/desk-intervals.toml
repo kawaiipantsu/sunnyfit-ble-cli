@@ -1,0 +1,17 @@
+name = "Desk rhythm — 12 minutes"
+repeats = 3
+[[steps]]
+name = "Comfortable spin"
+seconds = 120
+cadence_min = 40
+cadence_max = 65
+[[steps]]
+name = "Lift the rhythm"
+seconds = 60
+cadence_min = 65
+cadence_max = 85
+[[steps]]
+name = "Recovery"
+seconds = 60
+cadence_min = 25
+cadence_max = 45

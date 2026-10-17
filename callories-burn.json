@@ -1,0 +1,168 @@
+{
+  "schema": "sunnyfit.food-equivalents.v1",
+  "description": "Playful approximate energy comparisons, not meal tracking. Portions and recipes vary. Workout energy may itself be estimated.",
+  "sources": [
+    {
+      "title": "FDA raw-fruit serving sizes and calories",
+      "url": "https://www.fda.gov/food/food-labeling-nutrition/raw-fruits-poster-text-version-accessible-version",
+      "scope": "Apple, banana, orange and strawberry servings; other entries are rounded illustrative portions, not verified brand nutrition labels."
+    },
+    {
+      "title": "USDA FoodData Central",
+      "url": "https://fdc.nal.usda.gov/",
+      "scope": "Reference for looking up exact foods and portions when customizing this file."
+    }
+  ],
+  "foods": [
+    {
+      "id": "pizza-slice",
+      "name": "a slice of cheese pizza",
+      "portion": "1 medium slice",
+      "kcal": 285
+    },
+    {
+      "id": "banana",
+      "name": "a banana",
+      "portion": "1 medium banana",
+      "kcal": 110
+    },
+    {
+      "id": "apple",
+      "name": "an apple",
+      "portion": "1 large apple",
+      "kcal": 130
+    },
+    {
+      "id": "orange",
+      "name": "an orange",
+      "portion": "1 medium orange",
+      "kcal": 80
+    },
+    {
+      "id": "strawberries",
+      "name": "a bowl of strawberries",
+      "portion": "8 medium strawberries",
+      "kcal": 50
+    },
+    {
+      "id": "chocolate",
+      "name": "a few squares of chocolate",
+      "portion": "25 g milk chocolate",
+      "kcal": 135
+    },
+    {
+      "id": "cookie",
+      "name": "a chocolate-chip cookie",
+      "portion": "1 medium cookie",
+      "kcal": 80
+    },
+    {
+      "id": "croissant",
+      "name": "a croissant",
+      "portion": "1 medium plain croissant",
+      "kcal": 230
+    },
+    {
+      "id": "donut",
+      "name": "a glazed donut",
+      "portion": "1 medium donut",
+      "kcal": 240
+    },
+    {
+      "id": "ice-cream",
+      "name": "a scoop of ice cream",
+      "portion": "1 small scoop, about 65 g",
+      "kcal": 140
+    },
+    {
+      "id": "popcorn",
+      "name": "a bowl of popcorn",
+      "portion": "3 cups air-popped",
+      "kcal": 90
+    },
+    {
+      "id": "toast",
+      "name": "a slice of toast",
+      "portion": "1 slice plain bread",
+      "kcal": 80
+    },
+    {
+      "id": "egg",
+      "name": "an egg",
+      "portion": "1 large egg",
+      "kcal": 70
+    },
+    {
+      "id": "almonds",
+      "name": "a handful of almonds",
+      "portion": "28 g",
+      "kcal": 165
+    },
+    {
+      "id": "peanut-butter",
+      "name": "a spoonful of peanut butter",
+      "portion": "1 tablespoon",
+      "kcal": 95
+    },
+    {
+      "id": "yogurt",
+      "name": "a small yogurt",
+      "portion": "150 g plain yogurt",
+      "kcal": 95
+    },
+    {
+      "id": "latte",
+      "name": "a small latte",
+      "portion": "240 ml with milk, no syrup",
+      "kcal": 120
+    },
+    {
+      "id": "pancake",
+      "name": "a pancake",
+      "portion": "1 medium plain pancake",
+      "kcal": 90
+    },
+    {
+      "id": "fries",
+      "name": "a small portion of fries",
+      "portion": "75 g",
+      "kcal": 235
+    },
+    {
+      "id": "burger",
+      "name": "a basic burger",
+      "portion": "1 small burger",
+      "kcal": 300
+    },
+    {
+      "id": "cinnamon-roll",
+      "name": "a cinnamon roll",
+      "portion": "1 medium roll",
+      "kcal": 350
+    },
+    {
+      "id": "pasta",
+      "name": "a bowl of plain pasta",
+      "portion": "1 cup cooked",
+      "kcal": 200
+    },
+    {
+      "id": "rice",
+      "name": "a bowl of rice",
+      "portion": "1 cup cooked",
+      "kcal": 205
+    },
+    {
+      "id": "potato",
+      "name": "a baked potato",
+      "portion": "1 medium, no toppings",
+      "kcal": 160
+    },
+    {
+      "id": "oatmeal",
+      "name": "a bowl of oatmeal",
+      "portion": "1 cup cooked in water",
+      "kcal": 155
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+# Preserve recorded data, logs and the service account even on purge.
+exit 0

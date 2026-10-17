@@ -22,7 +22,7 @@ make                 # list targets
 make build
 make check           # format, Clippy, unit and isolated integration tests
 make deb             # optimized executable and dist/*.deb
-sudo apt install ./dist/sunnyfit-ble-cli_0.2.0-1_amd64.deb
+sudo apt install ./dist/sunnyfit-ble-cli_0.3.0-1_amd64.deb
 ```
 
 The Realtek USB adapter already uses the kernel's `btusb`/`btrtl` drivers. The
@@ -221,16 +221,21 @@ results are logged. No app/APK/decompiled source is redistributed by this projec
 
 ## Background service and deployment
 
-The package includes an optional systemd **user** unit; installation does not
-enable it automatically. Configure the bike and Redis as the intended user, then:
+The Debian package installs a system service, disabled by default. Configure
+`/etc/sunnyfit-ble-cli/config.toml` and the root-private environment file
+`/etc/default/sunnyfit-ble-cli`, then explicitly enable it:
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now sunnyfit-ble-cli
+sudo systemctl enable --now sunnyfit-ble-cli
 ```
 
-`make deploy` reads the external private deployment instructions and checks the
-configured API authentication and suites, without printing credentials or publishing. See [Debian deployment](DEPLOYMENT.md). Source is hosted on GitHub; Debian packages are distributed through apt.thugs.red.
+See [service and storage](SERVICE.md) for multiple sinks, permissions, database
+schema and logs. The legacy user service remains available for per-user capture;
+use only one instance per bike.
+
+New in 0.3: [workout views and training](WORKOUT.md), [heart rate and profiles](DEVICES.md),
+and [FIT/TCX/CSV and Strava](EXPORT.md). Run `--help` for every config/ENV override.
+
 
 ## References
 

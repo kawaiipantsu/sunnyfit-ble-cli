@@ -10,6 +10,30 @@ use std::{
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub systemd: bool,
+    pub sinks: Vec<String>,
+    pub mysql_url: Option<String>,
+    pub sqlite_path: PathBuf,
+    pub database_queue: usize,
+    pub log_file: PathBuf,
+    pub profile: String,
+    pub profile_file: Option<PathBuf>,
+    #[serde(skip)]
+    pub loaded_profile: Option<crate::profiles::Profile>,
+    pub heart_rate_device: Option<String>,
+    pub heart_rate_adapter: Option<String>,
+    pub food_file: Option<PathBuf>,
+    pub interval_plan: Option<PathBuf>,
+    pub ghost: Option<String>,
+    pub route: String,
+    pub daily_goal_minutes: u64,
+    pub focus_minutes: u64,
+    pub break_minutes: u64,
+    pub movement_reminder_minutes: u64,
+    pub cadence_alert_rpm: f64,
+    pub cadence_alert_seconds: u64,
+    pub notifications: bool,
+
     pub adapter: Option<String>,
     pub device: Option<String>,
     pub pair: bool,
@@ -40,6 +64,28 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            systemd: false,
+            sinks: vec!["local".into(), "redis".into()],
+            mysql_url: None,
+            sqlite_path: PathBuf::from("/var/lib/sunnyfit-ble-cli/workouts.sqlite3"),
+            database_queue: 2048,
+            log_file: PathBuf::from("/var/log/sunnyfit-ble-cli.log"),
+            profile: "auto".into(),
+            profile_file: None,
+            loaded_profile: None,
+            heart_rate_device: None,
+            heart_rate_adapter: None,
+            food_file: None,
+            interval_plan: None,
+            ghost: None,
+            route: "denmark".into(),
+            daily_goal_minutes: 30,
+            focus_minutes: 25,
+            break_minutes: 5,
+            movement_reminder_minutes: 30,
+            cadence_alert_rpm: 30.,
+            cadence_alert_seconds: 20,
+            notifications: false,
             adapter: None,
             device: None,
             pair: false,
@@ -72,7 +118,7 @@ impl Default for Config {
 #[derive(Parser)]
 #[command(version, about = "SunnyFit BLE recorder, workout TUI and Redis bridge")]
 pub struct Cli {
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SUNNY_CONFIG")]
     pub config: Option<PathBuf>,
     /// Show the live workout dashboard (on stderr; stdout stays machine-readable).
     #[arg(long)]
@@ -110,67 +156,207 @@ pub enum Command {
     Replay { path: PathBuf },
     /// Check adapter power, BlueZ, and Realtek firmware without connecting.
     Doctor,
+    /// Guided discovery and GATT inspection, then remember a compatible bike.
+    Wizard { address: Option<bluer::Address> },
+    /// List built-in and optional declarative device profiles.
+    Profiles,
+    /// Validate a captured-frame fixture against the selected profile.
+    ValidateProfile { fixture: PathBuf },
+    /// Export indoor cycling telemetry to CSV, TCX, or FIT.
+    Export {
+        input: Option<PathBuf>,
+        #[arg(long, value_parser=["csv","tcx","fit"])]
+        format: String,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long, value_parser=["sqlite","mysql"], default_value="sqlite")]
+        database: String,
+    },
+    /// List sessions stored in SQLite or MySQL.
+    Sessions {
+        #[arg(long, value_parser=["sqlite","mysql"], default_value="sqlite")]
+        database: String,
+    },
+    /// Explicitly upload an indoor session to Strava (OAuth credentials from environment/private token file).
+    Sync {
+        input: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Print a Strava authorization URL, or exchange an authorization code from SUNNY_STRAVA_CODE.
+    StravaAuth {
+        #[arg(long)]
+        exchange: bool,
+    },
     /// Print the config file location (never its secret values).
     Config,
 }
 #[derive(Args, Default)]
 pub struct Overrides {
-    #[arg(long, global = true)]
+    /// Headless connector: external sinks and a service log, without workout history/UI.
+    #[arg(long, global=true, env="SUNNY_SYSTEMD", num_args=0..=1, default_missing_value="true")]
+    pub systemd: Option<bool>,
+    /// Comma-separated destinations: local, redis, mysql, sqlite. May enable several.
+    #[arg(long, global = true, env = "SUNNY_SINKS", value_delimiter = ',')]
+    pub sinks: Option<Vec<String>>,
+    #[arg(long, global = true, env = "SUNNY_MYSQL_URL", hide_env_values = true)]
+    pub mysql_url: Option<String>,
+    #[arg(long, global = true, env = "SUNNY_SQLITE_PATH")]
+    pub sqlite_path: Option<PathBuf>,
+    #[arg(long, global = true, env = "SUNNY_DATABASE_QUEUE")]
+    pub database_queue: Option<usize>,
+    #[arg(long, global = true, env = "SUNNY_LOG_FILE")]
+    pub log_file: Option<PathBuf>,
+    #[arg(long, global = true, env = "SUNNY_PROFILE")]
+    pub profile: Option<String>,
+    #[arg(long, global = true, env = "SUNNY_PROFILE_FILE")]
+    pub profile_file: Option<PathBuf>,
+    #[arg(long, global = true, env = "SUNNY_HEART_RATE_DEVICE")]
+    pub heart_rate_device: Option<bluer::Address>,
+    #[arg(long, global = true, env = "SUNNY_HEART_RATE_ADAPTER")]
+    pub heart_rate_adapter: Option<String>,
+    #[arg(long, global = true, env = "SUNNY_FOOD_FILE")]
+    pub food_file: Option<PathBuf>,
+    #[arg(long, global = true, env = "SUNNY_INTERVAL_PLAN")]
+    pub interval_plan: Option<PathBuf>,
+    /// Previous run directory/events file, or latest/best.
+    #[arg(long, global = true, env = "SUNNY_GHOST")]
+    pub ghost: Option<String>,
+    #[arg(long, global = true, env = "SUNNY_ROUTE")]
+    pub route: Option<String>,
+    #[arg(long, global = true, env = "SUNNY_DAILY_GOAL_MINUTES")]
+    pub daily_goal_minutes: Option<u64>,
+    #[arg(long, global = true, env = "SUNNY_FOCUS_MINUTES")]
+    pub focus_minutes: Option<u64>,
+    #[arg(long, global = true, env = "SUNNY_BREAK_MINUTES")]
+    pub break_minutes: Option<u64>,
+    #[arg(long, global = true, env = "SUNNY_MOVEMENT_REMINDER_MINUTES")]
+    pub movement_reminder_minutes: Option<u64>,
+    #[arg(long, global = true, env = "SUNNY_CADENCE_ALERT_RPM")]
+    pub cadence_alert_rpm: Option<f64>,
+    #[arg(long, global = true, env = "SUNNY_CADENCE_ALERT_SECONDS")]
+    pub cadence_alert_seconds: Option<u64>,
+    #[arg(long, global=true, env="SUNNY_NOTIFICATIONS", num_args=0..=1, default_missing_value="true")]
+    pub notifications: Option<bool>,
+
+    #[arg(long, global = true, env = "SUNNY_ADAPTER", hide_env_values = true)]
     pub adapter: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SUNNY_DEVICE", hide_env_values = true)]
     pub device: Option<bluer::Address>,
-    #[arg(long,global=true,num_args=0..=1,default_missing_value="true")]
+    #[arg(long,global=true,num_args=0..=1,default_missing_value="true", env="SUNNY_PAIR", hide_env_values=true)]
     pub pair: Option<bool>,
-    #[arg(long,global=true,num_args=0..=1,default_missing_value="true")]
+    #[arg(long,global=true,num_args=0..=1,default_missing_value="true", env="SUNNY_RECONNECT", hide_env_values=true)]
     pub reconnect: Option<bool>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_TIMEOUT_SECONDS",
+        hide_env_values = true
+    )]
     pub timeout_seconds: Option<u64>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_RECONNECT_MAX_SECONDS",
+        hide_env_values = true
+    )]
     pub reconnect_max_seconds: Option<u64>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_STALE_SECONDS",
+        hide_env_values = true
+    )]
     pub stale_seconds: Option<u64>,
     /// Poll readable characteristics; 0 disables polling (default).
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_POLL_SECONDS",
+        hide_env_values = true
+    )]
     pub poll_seconds: Option<u64>,
     /// Explicit initialization UUID=HEX, repeatable; replayed on each connection.
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_INIT_COMMAND",
+        hide_env_values = true
+    )]
     pub init_command: Vec<String>,
     /// Enable observed Sunny startup only for the exact SF-B023005DGY model.
-    #[arg(long,global=true,num_args=0..=1,default_missing_value="true")]
+    #[arg(long,global=true,num_args=0..=1,default_missing_value="true", env="SUNNY_SUNNY_PROTOCOL", hide_env_values=true)]
     pub sunny_protocol: Option<bool>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_WHEEL_CIRCUMFERENCE_M",
+        hide_env_values = true
+    )]
     pub wheel_circumference_m: Option<f64>,
     /// Calibrated virtual distance per crank turn; no assumed bike gearing.
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_METERS_PER_CRANK",
+        hide_env_values = true
+    )]
     pub meters_per_crank: Option<f64>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SUNNY_WEIGHT_KG", hide_env_values = true)]
     pub weight_kg: Option<f64>,
     /// Explicit MET assumption for estimated calories while moving.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SUNNY_MET", hide_env_values = true)]
     pub met: Option<f64>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_GOAL_MINUTES",
+        hide_env_values = true
+    )]
     pub goal_minutes: Option<u64>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_TARGET_CADENCE",
+        hide_env_values = true
+    )]
     pub target_cadence: Option<f64>,
-    #[arg(long,global=true,num_args=0..=1,default_missing_value="true")]
+    #[arg(long,global=true,num_args=0..=1,default_missing_value="true", env="SUNNY_REDIS_ENABLED", hide_env_values=true)]
     pub redis_enabled: Option<bool>,
     #[arg(long, global = true, env = "SUNNY_REDIS_URL", hide_env_values = true)]
     pub redis_url: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SUNNY_RAW_CHANNEL", hide_env_values = true)]
     pub raw_channel: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_METRICS_CHANNEL",
+        hide_env_values = true
+    )]
     pub metrics_channel: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_STATUS_CHANNEL",
+        hide_env_values = true
+    )]
     pub status_channel: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "SUNNY_WORKOUT_CHANNEL",
+        hide_env_values = true
+    )]
     pub workout_channel: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SUNNY_REDIS_QUEUE", hide_env_values = true)]
     pub redis_queue: Option<usize>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "SUNNY_OUTPUT_DIR", hide_env_values = true)]
     pub output_dir: Option<PathBuf>,
-    #[arg(long,global=true,num_args=0..=1,default_missing_value="true")]
+    #[arg(long,global=true,num_args=0..=1,default_missing_value="true", env="SUNNY_DEBUG_STDOUT", hide_env_values=true)]
     pub debug_stdout: Option<bool>,
-    #[arg(long,short='v',global=true,num_args=0..=1,default_missing_value="true")]
+    #[arg(long,short='v',global=true,num_args=0..=1,default_missing_value="true", env="SUNNY_VERBOSE", hide_env_values=true)]
     pub verbose: Option<bool>,
 }
 impl Config {
@@ -185,6 +371,20 @@ impl Config {
         macro_rules! set { ($($f:ident),*) => { $(if let Some(v)=&o.$f { self.$f=v.clone(); })* } }
         macro_rules! opt { ($($f:ident),*) => { $(if let Some(v)=&o.$f { self.$f=Some(v.clone()); })* } }
         set!(
+            systemd,
+            sinks,
+            sqlite_path,
+            database_queue,
+            log_file,
+            profile,
+            route,
+            daily_goal_minutes,
+            focus_minutes,
+            break_minutes,
+            movement_reminder_minutes,
+            cadence_alert_rpm,
+            cadence_alert_seconds,
+            notifications,
             sunny_protocol,
             pair,
             reconnect,
@@ -205,6 +405,12 @@ impl Config {
             verbose
         );
         opt!(
+            food_file,
+            mysql_url,
+            profile_file,
+            heart_rate_adapter,
+            interval_plan,
+            ghost,
             adapter,
             wheel_circumference_m,
             meters_per_crank,
@@ -215,6 +421,57 @@ impl Config {
         if !o.init_command.is_empty() {
             self.init_command = o.init_command.clone();
         }
+        if let Some(address) = o.heart_rate_device {
+            self.heart_rate_device = Some(address.to_string());
+        }
+        for sink in &self.sinks {
+            if !["local", "redis", "mysql", "sqlite"].contains(&sink.as_str()) {
+                bail!("sinks must be local, redis, mysql, or sqlite");
+            }
+        }
+        self.sinks.sort();
+        self.sinks.dedup();
+        if self.systemd {
+            self.sinks.retain(|s| s != "local");
+            self.debug_stdout = false;
+            self.verbose = false;
+        }
+        if self.sinks.is_empty() {
+            bail!("select at least one data sink with --sinks");
+        }
+        if self.sinks.iter().any(|s| s == "mysql") && self.mysql_url.is_none() {
+            bail!("mysql sink requires SUNNY_MYSQL_URL or --mysql-url");
+        }
+        if self.systemd
+            && !self.sinks.iter().any(|s| {
+                s == "sqlite"
+                    || s == "mysql"
+                    || (s == "redis" && self.redis_enabled && self.redis_url.is_some())
+            })
+        {
+            bail!("systemd mode requires an external sink; use --sinks sqlite, mysql, or configured redis");
+        }
+        if self.database_queue == 0
+            || self.daily_goal_minutes == 0
+            || self.focus_minutes == 0
+            || self.break_minutes == 0
+            || self.movement_reminder_minutes == 0
+            || self.cadence_alert_seconds == 0
+        {
+            bail!("queue and timer settings must be positive");
+        }
+        if !self.cadence_alert_rpm.is_finite() || self.cadence_alert_rpm < 0. {
+            bail!("cadence alert must be finite and nonnegative");
+        }
+        if let Some(address) = &self.heart_rate_device {
+            address
+                .parse::<bluer::Address>()
+                .map_err(|_| anyhow::anyhow!("invalid heart-rate device address"))?;
+        }
+        if !["denmark", "route66", "summit"].contains(&self.route.as_str()) {
+            bail!("route must be denmark, route66, or summit");
+        }
+        self.loaded_profile = crate::profiles::load(self)?;
         for cmd in &self.init_command {
             let (u, h) = cmd
                 .split_once('=')
@@ -225,6 +482,9 @@ impl Config {
         }
         if let Some(v) = o.device {
             self.device = Some(v.to_string());
+        }
+        if self.heart_rate_device.is_some() && self.heart_rate_device == self.device {
+            bail!("external heart-rate sensor must differ from the bike");
         }
         if self.timeout_seconds == 0
             || self.reconnect_max_seconds == 0
@@ -291,7 +551,15 @@ pub fn init() -> Result<PathBuf> {
     let base = directories::BaseDirs::new().context("cannot find home configuration directory")?;
     let dir = base.config_dir().join("sunnyfit-ble-cli");
     private_dir(&dir)?;
-    private_dir(&dir.join("past-workouts"))?;
+    let service = std::env::args().any(|a| a == "--systemd" || a == "--systemd=true")
+        || std::env::var("SUNNY_SYSTEMD").is_ok_and(|v| v == "true");
+    if !service {
+        private_dir(&dir.join("past-workouts"))?;
+    }
+    let food = dir.join("callories-burn.json");
+    if !food.exists() {
+        write_private(&food, include_bytes!("../callories-burn.json"))?;
+    }
     let path = dir.join("config.toml");
     if !path.exists() {
         let content=format!("# SunnyFit: command-line settings override this file.\n# Optional: adapter = \"hci1\", device = \"AA:BB:CC:DD:EE:FF\"\n# Optional: meters_per_crank = 1.0, met = 3.0 (user calibration/assumption)\n# Prefer SUNNY_REDIS_URL for secrets. Unknown measurements remain null.\n{}",toml::to_string_pretty(&Config::default())?);

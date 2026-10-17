@@ -1,6 +1,6 @@
 [package]
 name = "sunnyfit-ble-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.90"
 description = "Linux Bluetooth workout recorder, terminal dashboard and Redis bridge"
@@ -25,6 +25,12 @@ toml = "0.8"
 ratatui = "0.29"
 crossterm = "0.28"
 directories = "6"
+
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "mysql", "any"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+fs2 = "0.4"
+csv = "1"
 
 [profile.release]
 lto = "thin"

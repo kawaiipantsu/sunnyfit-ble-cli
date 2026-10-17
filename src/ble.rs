@@ -19,10 +19,12 @@ use tokio::{
 pub struct Events {
     pub tx: mpsc::Sender<Value>,
     pub epoch: u64,
+    pub role: String,
     pub start: Instant,
 }
 impl Events {
     pub async fn send(&self, mut v: Value) -> Result<()> {
+        v["device_role"] = json!(self.role);
         v["epoch"] = json!(self.epoch);
         v["observed_elapsed_ms"] = json!(self.start.elapsed().as_millis());
         self.tx
@@ -345,7 +347,11 @@ async fn epoch(c: &Config, d: &Device, mode: Mode, out: &Events) -> Result<()> {
     if mode == Mode::Inspect || mode == Mode::Connect {
         return Ok(());
     }
-    let automatic = c.sunny_protocol && exact_model && c.init_command.is_empty();
+    let automatic = c.sunny_protocol
+        && exact_model
+        && c.init_command.is_empty()
+        && c.loaded_profile.is_none()
+        && matches!(c.profile.as_str(), "auto" | "sunny-mini");
     let commands = if automatic {
         crate::sunny::startup()
     } else {
@@ -480,4 +486,37 @@ pub async fn doctor(c: &Config) -> Result<()> {
         println!("{name}: powered={}", a.is_powered().await.unwrap_or(false));
     }
     Ok(())
+}
+
+/// A bounded LE scan for the interactive wizard; does not pair or write GATT values.
+pub async fn choose(c: &Config, seconds: u64) -> Result<Address> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        bail!("noninteractive wizard requires an explicit Bluetooth address");
+    }
+    let (_session, a) = adapter(c).await?;
+    let stream = discover(c, &a).await?;
+    futures::pin_mut!(stream);
+    let end = tokio::time::sleep(Duration::from_secs(seconds));
+    tokio::pin!(end);
+    let mut devices = Vec::new();
+    eprintln!("Searching for awake BLE devices…");
+    loop {
+        tokio::select! {_=&mut end=>break,event=stream.next()=>match event{Some(AdapterEvent::DeviceAdded(addr))=>{if devices.contains(&addr){continue;}let d=a.device(addr)?;let name=d.name().await.ok().flatten().unwrap_or_else(||"Unnamed device".into());let safe:String=name.chars().filter(|c|!c.is_control()).collect();devices.push(addr);eprintln!("{}  {}  {}",devices.len(),addr,safe);},Some(_)=>{},None=>break}}
+    }
+    if devices.is_empty() {
+        bail!("no devices discovered; wake the bike or wear your heart-rate sensor");
+    }
+    eprint!("Select a device number for read-only GATT inspection: ");
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let index: usize = input
+        .trim()
+        .parse()
+        .context("enter a listed device number")?;
+    devices
+        .get(index.wrapping_sub(1))
+        .copied()
+        .context("device number outside discovery results")
 }

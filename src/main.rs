@@ -1,9 +1,16 @@
 mod ble;
 mod config;
+mod export;
+mod food;
 mod metrics;
+mod profiles;
 mod publish;
+mod service;
+mod sinks;
 mod storage;
+mod strava;
 mod sunny;
+mod training;
 mod tui;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
@@ -22,10 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 use storage::{unhex, Recorder};
-use tokio::{
-    sync::{mpsc, watch},
-    time::timeout,
-};
+use tokio::sync::{mpsc, watch};
 
 struct Output {
     tx: sync_mpsc::SyncSender<String>,
@@ -64,21 +68,48 @@ impl Output {
     }
 }
 struct Engine {
-    rec: Recorder,
+    rec: Option<Recorder>,
+    run_id: String,
+    sequence: u64,
+    demo: bool,
+    databases: Vec<sinks::Sink>,
+    external_hr: Option<(metrics::Sample, u64)>,
+    detected_profile: String,
     publisher: Option<publish::Publisher>,
     output: Option<Output>,
     c: Config,
     workout: Workout,
     decoders: HashMap<String, Decoder>,
-    epoch: u64,
+    epochs: HashMap<String, u64>,
     raw: u64,
     unknown: u64,
     coverage_errors: u64,
     gaps: u64,
 }
 impl Engine {
-    fn emit(&mut self, row: Value, ms: u64, channel: &str) -> Result<Value> {
-        let row = self.rec.record(row, ms)?;
+    fn emit(&mut self, mut row: Value, ms: u64, channel: &str) -> Result<Value> {
+        self.sequence += 1;
+        row["schema"] = json!("sunnyfit.event.v1");
+        row["run_id"] = json!(self.run_id);
+        row["sequence"] = json!(self.sequence);
+        row["timestamp_unix_ms"] = json!(storage::unix_ms());
+        row["elapsed_ms"] = json!(ms);
+        row["demo"] = json!(self.demo);
+        if let Some(rec) = &mut self.rec {
+            rec.record(&row)?;
+        }
+        for sink in &mut self.databases {
+            sink.enqueue(&row);
+        }
+        if matches!(
+            row["type"].as_str(),
+            Some("connection" | "retry" | "ready" | "workout_summary")
+        ) {
+            service::log(
+                row["type"].as_str().unwrap(),
+                json!({"run_id":self.run_id,"role":row["device_role"],"state":row["state"],"elapsed_ms":ms}),
+            );
+        }
         if let Some(p) = &mut self.publisher {
             p.enqueue(channel, &row);
         }
@@ -98,14 +129,42 @@ impl Engine {
     }
     fn input(&mut self, row: Value, ms: u64) -> Result<()> {
         let epoch = row["epoch"].as_u64().unwrap_or(0);
-        if epoch != self.epoch {
-            self.decoders.clear();
-            self.epoch = epoch;
+        let role = row["device_role"].as_str().unwrap_or("bike").to_owned();
+        let hr = role == "heart_rate";
+        if self.epochs.get(&role) != Some(&epoch) {
+            self.decoders
+                .retain(|key, _| !key.starts_with(&format!("{role}:")));
+            self.epochs.insert(role.clone(), epoch);
         }
         let kind = row["type"].as_str().unwrap_or("").to_owned();
+        if !hr {
+            let u = row["characteristic_uuid"].as_str().unwrap_or("");
+            if u == sunny::MOTION {
+                self.detected_profile = "sunny-mini".into();
+            } else if self.detected_profile != "sunny-mini"
+                && u == "00002ad2-0000-1000-8000-00805f9b34fb"
+            {
+                self.detected_profile = "ftms".into();
+            } else if matches!(self.detected_profile.as_str(), "raw" | "heart-rate")
+                && u == "00002a5b-0000-1000-8000-00805f9b34fb"
+            {
+                self.detected_profile = "csc".into();
+            } else if self.detected_profile == "raw" && u == profiles::HEART_RATE {
+                self.detected_profile = "heart-rate".into();
+            }
+        }
+
         if kind == "connection" {
-            self.workout
-                .connection(row["state"].as_str().unwrap_or("unknown"));
+            if hr {
+                if row["state"] != "ready" {
+                    self.external_hr = None;
+                    self.workout
+                        .external_heart_rate(&metrics::Sample::default(), ms);
+                }
+            } else {
+                self.workout
+                    .connection(row["state"].as_str().unwrap_or("unknown"));
+            }
         }
         if kind == "coverage_gap" {
             self.gaps += 1;
@@ -130,7 +189,7 @@ impl Engine {
             self.raw += 1;
             let uuid = row["characteristic_uuid"].as_str().unwrap_or("");
             let source = format!(
-                "{}:{}:{}",
+                "{role}:{}:{}:{}",
                 row["service_id"], row["characteristic_id"], uuid
             );
             let bytes = unhex(row["value_hex"].as_str().unwrap_or(""))?;
@@ -146,10 +205,20 @@ impl Engine {
             let pending = decoder.pending();
             match result {
                 Ok(Some(sample)) => {
-                    let decoded =
-                        json!({"type":"decoded","source_event":row["sequence"],"sample":sample});
-                    self.workout
-                        .ingest(sample, ms, row["sequence"].as_u64().unwrap(), &self.c);
+                    let decoded = json!({"type":"decoded","device_role":role,"source_event":row["sequence"],"sample":sample});
+                    if hr {
+                        if uuid == profiles::HEART_RATE {
+                            self.workout.external_heart_rate(&sample, ms);
+                            self.external_hr = Some((sample, ms));
+                        }
+                    } else {
+                        let mut sample = sample;
+                        if self.c.heart_rate_device.is_some() {
+                            sample.heart_rate_bpm = None;
+                        }
+                        self.workout
+                            .ingest(sample, ms, row["sequence"].as_u64().unwrap(), &self.c);
+                    }
                     let ch = self.c.metrics_channel.clone();
                     self.emit(decoded, ms, &ch)?;
                 }
@@ -201,7 +270,7 @@ async fn demo(out: ble::Events, mut stop: watch::Receiver<bool>) -> Result<()> {
 }
 async fn record(
     cli: &Cli,
-    c: Config,
+    mut c: Config,
     config_path: &Path,
     mode: ble::Mode,
     explicit: Option<bluer::Address>,
@@ -211,15 +280,42 @@ async fn record(
     } else {
         Some(address(&c, explicit)?)
     };
+    c.device = selected.map(|a| a.to_string());
     let mut ui = if cli.workout {
         Some(tui::Ui::new()?)
     } else {
         None
     };
     let publisher = publish::Publisher::new(&c)?;
-    let rec = Recorder::new(&base_dir(&c, config_path), cli.demo)?;
+    let rec = if c.sinks.iter().any(|s| s == "local") {
+        Some(Recorder::new(&base_dir(&c, config_path), cli.demo)?)
+    } else {
+        None
+    };
+    let run_id = rec
+        .as_ref()
+        .map(|r| r.run_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let databases = sinks::Sink::start(&c)?;
+    let mut training = if cli.workout {
+        Some(training::Training::new(
+            &c,
+            config_path.parent().unwrap_or(Path::new(".")),
+            &run_id,
+            cli.demo,
+            &base_dir(&c, config_path),
+        )?)
+    } else {
+        None
+    };
     let mut e = Engine {
         rec,
+        run_id,
+        sequence: 0,
+        demo: cli.demo,
+        databases,
+        external_hr: None,
+        detected_profile: "raw".into(),
         publisher,
         output: if c.debug_stdout {
             Some(Output::new())
@@ -229,7 +325,7 @@ async fn record(
         c: c.clone(),
         workout: Workout::default(),
         decoders: HashMap::new(),
-        epoch: 0,
+        epochs: HashMap::new(),
         raw: 0,
         unknown: 0,
         coverage_errors: 0,
@@ -241,7 +337,33 @@ async fn record(
     let out = ble::Events {
         tx,
         epoch: 0,
+        role: "bike".into(),
         start,
+    };
+    let mut hr_worker = if !cli.demo && mode == ble::Mode::Capture {
+        if let Some(hr) = &c.heart_rate_device {
+            let mut hc = c.clone();
+            hc.device = Some(hr.clone());
+            hc.adapter = c.heart_rate_adapter.clone().or(c.adapter.clone());
+            hc.profile = "heart-rate".into();
+            hc.loaded_profile = None;
+            hc.sunny_protocol = false;
+            hc.init_command.clear();
+            hc.pair = false;
+            let mut ho = out.clone();
+            ho.role = "heart_rate".into();
+            Some(tokio::spawn(ble::run(
+                hc,
+                hr.parse()?,
+                ble::Mode::Capture,
+                stop_rx.clone(),
+                ho,
+            )))
+        } else {
+            None
+        }
+    } else {
+        None
     };
     let mut worker = if cli.demo {
         tokio::spawn(demo(out, stop_rx))
@@ -261,12 +383,13 @@ async fn record(
                 result=&mut worker=>{worker_result=Some(result);break;},
                 _=tick.tick()=>{
                     let ms=start.elapsed().as_millis() as u64;e.workout.tick(ms,&c);
+                    if let Some((sample,time))=&e.external_hr {if ms.saturating_sub(*time)<=c.stale_seconds*1000 {e.workout.external_heart_rate(sample,*time);}}
+                    if last_metrics/30<ms/30000 {service::log("storage_health",json!({"databases":e.databases.iter().map(|s|s.stats()).collect::<Vec<_>>(),"redis":e.publisher.as_ref().map(|p|p.stats())}));}
                     if cli.seconds.is_some_and(|s|start.elapsed()>=Duration::from_secs(s)){break;}
                     if ms/1000>last_metrics{last_metrics=ms/1000;let ch=c.metrics_channel.clone();e.emit(json!({"type":"metrics","workout":e.workout}),ms,&ch)?;}
                     if let Some(ui)=&mut ui{
-                        match ui.input()?{tui::Action::Quit=>break,tui::Action::Pause=>{e.workout.set_paused(!e.workout.paused);let ch=c.status_channel.clone();e.emit(json!({"type":"pause","paused":e.workout.paused}),ms,&ch)?;},tui::Action::Marker=>{let ch=c.status_channel.clone();e.emit(json!({"type":"marker","label":"user marker"}),ms,&ch)?;},tui::Action::None=>{}}
-                        let status=if let Some(p)=&e.publisher{p.stats().to_string()}else{"off".into()};
-                        ui.draw(&e.workout,&c,cli.demo,e.raw,e.unknown,&status)?;
+                        match ui.input()?{tui::Action::Quit=>break,tui::Action::Pause=>{e.workout.set_paused(!e.workout.paused);let ch=c.status_channel.clone();e.emit(json!({"type":"pause","paused":e.workout.paused}),ms,&ch)?;},tui::Action::Marker=>{let ch=c.status_channel.clone();e.emit(json!({"type":"marker","label":"user marker"}),ms,&ch)?;},tui::Action::Focus=>{if let Some(t)=&mut training {t.focus_paused = !t.focus_paused;}},tui::Action::ResetFocus=>{if let Some(t)=&mut training {t.focus_s=0.;}},tui::Action::None=>{}}
+                        if let Some(t)=&mut training {t.tick(&e.workout,&c,ms)?;ui.draw(&e.workout,&c,cli.demo,t)?;}
                     }
                 }
             }
@@ -274,11 +397,23 @@ async fn record(
     }.await;
     let _ = stop_tx.send(true);
     if worker_result.is_none() {
-        match timeout(Duration::from_secs(c.timeout_seconds + 8), &mut worker).await {
-            Ok(r) => worker_result = Some(r),
-            Err(_) => {
-                worker.abort();
-                worker_result = Some(worker.await);
+        let deadline = tokio::time::sleep(Duration::from_secs(c.timeout_seconds + 8));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                r=&mut worker=>{worker_result=Some(r);break;},
+                row=rx.recv()=>{if let Some(row)=row {let _=e.input(row,start.elapsed().as_millis() as u64);}},
+                _=&mut deadline=>{worker.abort();worker_result=Some(worker.await);break;}
+            }
+        }
+    }
+    if let Some(mut task) = hr_worker.take() {
+        let deadline = tokio::time::sleep(Duration::from_secs(c.timeout_seconds + 8));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! { _=&mut task=>break,
+                row=rx.recv()=>{if let Some(row)=row {let _=e.input(row,start.elapsed().as_millis() as u64);}},
+                _=&mut deadline=>{task.abort();let _=task.await;break;}
             }
         }
     }
@@ -309,7 +444,13 @@ async fn record(
     } else {
         "complete_for_declared_scope"
     };
-    let mut summary = json!({"type":"workout_summary","run_id":e.rec.run_id,"demo":cli.demo,"capture_status":status,"raw_values":e.raw,"undecoded_values":e.unknown,"coverage_errors":e.coverage_errors,"incomplete_frames":incomplete_frames,"connection_gaps":e.gaps,"workout":e.workout,"protocol_validation":"Sunny SF-B023005DGY startup and telemetry observed; extended scenarios remain untested"});
+    let mut summary = json!({"type":"workout_summary","run_id":e.run_id,"demo":cli.demo,"capture_status":status,"raw_values":e.raw,"undecoded_values":e.unknown,"coverage_errors":e.coverage_errors,"incomplete_frames":incomplete_frames,"connection_gaps":e.gaps,"workout":e.workout,"protocol_validation":"Sunny SF-B023005DGY startup and telemetry observed; extended scenarios remain untested"});
+    summary["food_equivalent"] = json!(food::message(e.workout.calories_kcal));
+    if let Some(t) = &mut training {
+        if let Err(err) = t.persist() {
+            result = Err(err);
+        }
+    }
     let ch = c.workout_channel.clone();
     if let Err(err) = e.emit(summary.clone(), ms, &ch) {
         result = Err(err);
@@ -321,11 +462,38 @@ async fn record(
     if let Some(o) = e.output.take() {
         summary["stdout_dropped_or_failed"] = json!(o.finish());
     }
-    let dir = e.rec.dir.clone();
-    let save = e.rec.finish(summary);
+    let mut database_stats = Vec::new();
+    for sink in e.databases {
+        database_stats.push(sink.finish().await);
+    }
+    summary["databases"] = json!(database_stats);
+    service::log(
+        "stopped",
+        json!({"databases":summary["databases"],"redis":summary["redis"]}),
+    );
     drop(ui);
-    eprintln!("Saved capture and workout: {}", dir.display());
-    result.and(save)?;
+    if let Some(rec) = e.rec {
+        let dir = rec.dir.clone();
+        let save = rec.finish(summary);
+        eprintln!("Saved capture and workout: {}", dir.display());
+        result.and(save)?;
+    } else {
+        result?;
+    }
+
+    if matches!(cli.command, Some(Command::Wizard { .. })) {
+        let mut saved = Config::load(config_path)?;
+        if e.detected_profile == "heart-rate" {
+            saved.heart_rate_device = selected.map(|a| a.to_string());
+            saved.heart_rate_adapter = c.adapter.clone();
+        } else {
+            saved.device = selected.map(|a| a.to_string());
+            saved.adapter = c.adapter.clone();
+            saved.profile = e.detected_profile.clone();
+        }
+        config::write_private(config_path, toml::to_string_pretty(&saved)?.as_bytes())?;
+        eprintln!("Discovery complete. Saved {} profile. GATT inspection is in the capture above. Use validate-profile with sanitized fixtures before sharing a new decoder.",e.detected_profile);
+    }
     if matches!(mode, ble::Mode::Pair | ble::Mode::Connect) && !cli.demo {
         // Persist only the selection; do not persist any transient secret CLI overrides.
         let mut saved = Config::load(config_path)?;
@@ -427,7 +595,70 @@ async fn app() -> Result<()> {
     }
     let mut c = Config::load(path)?;
     c.apply(&cli.settings)?;
+    food::init(
+        c.food_file
+            .as_deref()
+            .unwrap_or(&default.parent().unwrap().join("callories-burn.json")),
+    )?;
+    if c.systemd {
+        if cli.workout {
+            bail!("--systemd and --workout cannot be combined");
+        }
+        service::init(&c.log_file)?;
+    }
     match &cli.command {
+        Some(Command::Profiles) => {
+            profiles::list();
+            Ok(())
+        }
+        Some(Command::ValidateProfile { fixture }) => {
+            println!("Validated {} frames", profiles::validate(&c, fixture)?);
+            Ok(())
+        }
+        Some(Command::Sessions { database }) => {
+            for row in sinks::sessions(&c, database).await? {
+                println!("{row}");
+            }
+            Ok(())
+        }
+        Some(Command::Wizard { address }) => {
+            let selected = if let Some(a) = address {
+                *a
+            } else {
+                ble::choose(&c, cli.seconds.unwrap_or(15)).await?
+            };
+            c.reconnect = false;
+            c.sinks = vec!["local".into()];
+            record(&cli, c, path, ble::Mode::Inspect, Some(selected)).await
+        }
+        Some(Command::Export {
+            input,
+            format,
+            output,
+            session,
+            database,
+        }) => {
+            let rows = match (input, session) {
+                (Some(path), None) => export::read(path)?,
+                (None, Some(id)) => sinks::events(&c, database, id).await?,
+                _ => bail!("provide either INPUT or --session ID"),
+            };
+            let activity = export::Activity::from_rows(&rows)?;
+            export::save(output, &activity.encode(format)?)?;
+            println!("Exported indoor cycling activity to {}", output.display());
+            Ok(())
+        }
+        Some(Command::Sync { input, name }) => {
+            strava::sync(
+                path.parent().unwrap_or(Path::new(".")),
+                input,
+                name.as_deref(),
+            )
+            .await
+        }
+        Some(Command::StravaAuth { exchange }) => {
+            strava::auth(path.parent().unwrap_or(Path::new(".")), *exchange).await
+        }
         Some(Command::Config) => {
             println!("{}", path.display());
             Ok(())
@@ -487,7 +718,54 @@ async fn app() -> Result<()> {
 #[tokio::main]
 async fn main() {
     if let Err(e) = app().await {
+        service::log(
+            "fatal",
+            json!({"message":"application stopped; see journal for diagnostic"}),
+        );
         eprintln!("Error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn heart_rate_disconnect_does_not_reset_bike() {
+        let mut e = Engine {
+            rec: None,
+            run_id: "test".into(),
+            sequence: 0,
+            demo: false,
+            databases: Vec::new(),
+            external_hr: None,
+            detected_profile: "raw".into(),
+            publisher: None,
+            output: None,
+            c: Config::default(),
+            workout: Workout::default(),
+            decoders: HashMap::new(),
+            epochs: HashMap::new(),
+            raw: 0,
+            unknown: 0,
+            coverage_errors: 0,
+            gaps: 0,
+        };
+        e.input(
+            json!({"type":"connection","state":"ready","device_role":"bike","epoch":1}),
+            0,
+        )
+        .unwrap();
+        e.input(json!({"type":"notification","device_role":"bike","epoch":1,"characteristic_uuid":"00002ad2-0000-1000-8000-00805f9b34fb","value_hex":"0400d0077800"}),100).unwrap();
+        e.input(json!({"type":"notification","device_role":"heart_rate","epoch":7,"characteristic_uuid":profiles::HEART_RATE,"value_hex":"0648"}),200).unwrap();
+        assert_eq!(e.workout.current.heart_rate_bpm, Some(72.));
+        assert_eq!(e.workout.current.cadence_rpm, Some(60.));
+        e.input(json!({"type":"connection","state":"disconnected","device_role":"heart_rate","epoch":7}),300).unwrap();
+        assert_eq!(e.workout.current.heart_rate_bpm, None);
+        assert_eq!(e.workout.current.cadence_rpm, Some(60.));
+        assert_eq!(e.workout.connection, "ready");
+        e.input(json!({"type":"notification","device_role":"heart_rate","epoch":8,"characteristic_uuid":profiles::HEART_RATE,"value_hex":"014b00"}),400).unwrap();
+        assert_eq!(e.workout.current.heart_rate_bpm, Some(75.));
+        assert_eq!(e.decoders.len(), 2);
     }
 }

@@ -5,7 +5,7 @@
 **Turn a desk ride into a live terminal workout.**
 
 Connect your SunnyFit mini bike. Watch your cadence. Keep a workout history.
-Send live telemetry to Redis and build your own dashboards around it.
+Send live telemetry to MySQL, Redis and SQLite—or turn your terminal into a tiny workout arcade.
 
 [![APT](https://img.shields.io/badge/INSTALL-APT-00d9c0?style=for-the-badge)](https://apt.thugs.red)
 ![Rust](https://img.shields.io/badge/RUST-1.90%2B-11151d?style=for-the-badge&logo=rust&logoColor=white)
@@ -38,22 +38,28 @@ Send live telemetry to Redis and build your own dashboards around it.
 | Area | What it does |
 | --- | --- |
 | **Bluetooth** | Discovers BLE devices, remembers your bike, supports explicit pairing and forgetting, and reconnects with a fresh startup handshake. |
-| **Workout** | Live speed, cadence, distance, elapsed and active time, estimated calories, cadence graph, activity goal and encouragement. Pause local totals, mark a moment, or save and quit. |
+| **Workout** | Nine tabbed views, a gradient speed graph, gauges, intervals, ghost races, simulated routes, an animated town, cadence games and a Pomodoro desk companion. |
+| **Motivation** | Persistent achievements, XP, daily challenges and playful food-energy comparisons from an editable JSON catalogue. |
 | **Telemetry** | Decodes the SF-B023005DGY's Sunny protocol, including fragmented packets, operating status and odometer. Standard FTMS and CSC decoders are also included. |
 | **History** | Saves raw events, decoded measurements and workout summaries locally. Replay recordings without the bike. |
-| **Redis** | Separate, configurable raw, metrics, status and workout channels for downstream dashboards and WebSocket applications. |
+| **Storage** | Concurrent MySQL/MariaDB, SQLite and Redis Pub/Sub destinations, with independent queues and reconnect handling. |
+| **Heart rate** | Independent standard Bluetooth HRS sensor connection, including compatible Polar, Garmin, Magene and iGPSport models; fixture-validated. |
+| **Export** | Indoor cycling FIT, TCX and CSV, plus explicit optional Strava OAuth/upload. |
 | **Headless operation** | Quiet capture by default, simple debug feedback on request, or line-by-line raw JSON with `--debug-stdout -v`. |
-| **Debian** | Makefile builds, a `.deb` package, and an optional systemd user service. Packages are distributed through [apt.thugs.red](https://apt.thugs.red). |
+| **Debian** | Makefile builds, a `.deb` package, and an installed system service that stays disabled until configured/enabled. Packages are distributed through [apt.thugs.red](https://apt.thugs.red). |
 
 ## Inside the terminal
 
-![SunnyFit workout TUI showing speed, cadence, distance, estimated calories, a cadence graph and an activity goal in demo mode](assets/screenshots/workout-demo.png)
+![SunnyFit workout TUI showing speed, cadence, distance, estimated calories, a gradient speed graph and an activity goal in demo mode](assets/screenshots/workout-demo.png)
 
 Captured from the actual executable in **demo mode**, with simulated measurements
 and a one-minute activity goal. The banner above was supplied by the project owner.
 
 | Key | Action |
 | --- | --- |
+| `Tab` / `Shift-Tab` / `1`–`9` | Switch workout views |
+| `g` | Switch cadence games |
+| `Enter` / `r` in Desk | Pause/reset the focus timer |
 | `space` / `p` | Pause or resume local workout totals |
 | `m` | Add a marker to the recording |
 | `q` / `Esc` / `Ctrl-C` | Save and exit |
@@ -65,7 +71,10 @@ sunnyfit-ble-cli --demo --workout --met 3
 ```
 
 The TUI renders to stderr; stdout remains available for JSON. Missing or stale
-measurements appear as unavailable. Calories are labelled as estimates.
+measurements appear as unavailable. Calories can be device estimates or user-calibrated estimates.
+See the [workout guide](docs/WORKOUT.md) for intervals, ghosts, routes, desk settings and food comparisons.
+
+![Animated town view captured from the running demo](assets/screenshots/town-demo.png)
 
 ## Install and connect
 
@@ -149,6 +158,10 @@ redis-cli PSUBSCRIBE 'sunny:bike:*'
 | `sunny:bike:status` | Connection changes, gaps, retries and markers |
 | `sunny:bike:workout` | End-of-session summary |
 
+Select multiple sinks with `--sinks local,mysql,redis,sqlite`. See the
+[service and database guide](docs/SERVICE.md) for schema details, environment
+configuration and the installed system unit.
+
 Local recording continues independently of Redis. Redis reconnects with backoff;
 queue drops and failed or unconfirmed deliveries are recorded. Pub/Sub is not a
 persistent queue. This build uses plain Redis transports without TLS support.
@@ -162,6 +175,8 @@ including when invoked with `--help`. `XDG_CONFIG_HOME` is respected.
 ```text
 ~/.config/sunnyfit-ble-cli/
 ├── config.toml
+├── callories-burn.json
+├── progress.json           # created by real TUI workouts
 └── past-workouts/
     └── <timestamp>-<run-id>/
         ├── manifest.json
@@ -169,7 +184,7 @@ including when invoked with `--help`. `XDG_CONFIG_HOME` is respected.
         └── summary.json
 ```
 
-Each configuration setting has a CLI override. An override changes only that
+Each configuration setting has a CLI and environment override (CLI > ENV > file). An override changes only that
 setting for the current invocation. Use `--config PATH` for an alternative file.
 
 ```sh
@@ -196,6 +211,10 @@ flowchart LR
     Workout --> TUI[Ratatui dashboard]
     Raw --> Redis[Redis Pub/Sub]
     Workout --> Redis
+    Sensor[Bluetooth heart-rate sensor] --> BlueZ
+    Raw --> DB[MySQL / MariaDB / SQLite]
+    Workout --> DB
+    Files --> Export[FIT / TCX / CSV / optional Strava]
     Redis --> Apps[Your applications / WebSocket bridge]
 ```
 
@@ -220,20 +239,24 @@ make demo            # simulated workout screen
 
 The integration suite starts an isolated local Redis instance and exercises the
 TUI in a pseudo-terminal. `make release FEATURES=vendored-dbus` builds the D-Bus
-client library from source. The package includes an optional user service; see
-[background operation](docs/USAGE.md#background-service-and-deployment).
+client library from source. The package includes a system service (disabled by default) and the legacy optional
+user unit; see [background operation](docs/SERVICE.md).
 
 ## Compatibility and verification
 
 Tested with a **Sunny Health & Fitness SF-B023005DGY**, Debian 13 and a Realtek
 RTL8761BU adapter. Live checks covered startup, movement and stopping, forced
-disconnect/reconnect, forgetting and remembering the bike. Twelve Rust tests and
-the CLI/TUI/Redis integration suite passed; see [the validation record](VALIDATION.md).
+disconnect/reconnect, forgetting and remembering the bike. The Rust tests and
+the CLI/TUI/storage integration suites passed; see [the validation record](VALIDATION.md).
 
 The bike supplies speed, cadence, device time, distance, estimated calories,
 odometer and status. Heart rate was unavailable, and the observed telemetry did
 not supply power, electronic resistance or battery. Standard FTMS/CSC support has
 parser tests but has not been verified against additional physical devices.
+The same limitation applies to heart-rate sensors; [model references and the
+precise compatibility scope](docs/DEVICES.md) distinguish expected support from
+hardware verification. Live MySQL and Redis delivery were checked, and the
+Garmin SDK independently decoded a generated FIT file.
 Long unattended sleep/wake scenarios and other firmware versions remain to be tested.
 
 This is an independent project, not an official Sunny Health & Fitness application.
@@ -244,6 +267,10 @@ Protocol research and observed limitations are documented in [PROTOCOL.md](docs/
 | Guide | Contents |
 | --- | --- |
 | [CLI reference](docs/USAGE.md) | Commands, config, Redis, capture, replay and background service |
+| [Workout app](docs/WORKOUT.md) | Tabs, intervals, ghosts, games, routes, desk mode and food comparisons |
+| [Service and storage](docs/SERVICE.md) | systemd, MySQL/MariaDB, SQLite, Redis and delivery guarantees |
+| [Devices and profiles](docs/DEVICES.md) | Heart-rate compatibility, discovery wizard and contributor fixtures |
+| [Export and Strava](docs/EXPORT.md) | FIT, TCX, CSV and explicit OAuth uploads |
 | [Protocol](docs/PROTOCOL.md) | GATT sources, startup, frame layout, units and hardware evidence |
 | [Validation](VALIDATION.md) | Automated checks, physical-bike tests and remaining limits |
 | [Debian deployment](docs/DEPLOYMENT.md) | Package builds, APT workflow and signing responsibilities |

@@ -73,6 +73,22 @@ impl Decoder {
         c: &Config,
         event: u64,
     ) -> Result<Option<Sample>> {
+        let u = uuid.to_ascii_lowercase();
+        if u == crate::profiles::HEART_RATE {
+            return heart_rate(data).map(Some);
+        }
+        if let Some(p) = &c.loaded_profile {
+            return crate::profiles::decode(p, uuid, data);
+        }
+        if c.profile == "raw" || c.profile == "heart-rate" {
+            return Ok(None);
+        }
+        if c.profile == "ftms" && u != "00002ad2-0000-1000-8000-00805f9b34fb" {
+            return Ok(None);
+        }
+        if c.profile == "csc" && u != "00002a5b-0000-1000-8000-00805f9b34fb" {
+            return Ok(None);
+        }
         if [
             crate::sunny::MOTION,
             crate::sunny::STATUS,
@@ -207,6 +223,53 @@ impl Decoder {
         Ok(Some(s))
     }
 }
+/// Bluetooth Heart Rate Service 1.0, §3.1.1; little endian, flags describe every optional field.
+pub fn heart_rate(data: &[u8]) -> Result<Sample> {
+    let mut b = Bytes(data, 0);
+    let flags = b.u8()?;
+    if flags & 0xe0 != 0 {
+        bail!("reserved Heart Rate Measurement flags");
+    }
+    let bpm = if flags & 1 != 0 {
+        b.u16()?
+    } else {
+        b.u8()? as u16
+    };
+    let contact = if flags & 4 != 0 {
+        Some(flags & 2 != 0)
+    } else {
+        None
+    };
+    let mut s = Sample::default();
+    if bpm > 0 && contact != Some(false) {
+        s.heart_rate_bpm = Some(bpm as f64);
+    }
+    s.extra
+        .insert("sensor_contact".into(), serde_json::json!(contact));
+    if flags & 8 != 0 {
+        s.extra
+            .insert("heart_rate_energy_kj".into(), serde_json::json!(b.u16()?));
+    }
+    if flags & 16 != 0 {
+        if b.0.len() - b.1 < 2 || !(b.0.len() - b.1).is_multiple_of(2) {
+            bail!("invalid RR intervals");
+        }
+        let mut rr = Vec::new();
+        while b.1 < b.0.len() {
+            rr.push(b.u16()? as f64 / 1024.);
+        }
+        s.extra
+            .insert("rr_intervals_s".into(), serde_json::json!(rr));
+    }
+    if b.1 != data.len() {
+        bail!("unexpected Heart Rate Measurement bytes");
+    }
+    s.provenance.insert(
+        "heart_rate_bpm".into(),
+        "Bluetooth HRS; external sensor".into(),
+    );
+    Ok(s)
+}
 #[derive(Clone, Serialize)]
 pub struct Workout {
     pub elapsed_s: f64,
@@ -263,6 +326,12 @@ impl Default for Workout {
     }
 }
 impl Workout {
+    pub fn external_heart_rate(&mut self, sample: &Sample, now: u64) {
+        self.current.heart_rate_bpm = sample.heart_rate_bpm;
+        self.field_times.insert("heart_rate_bpm".into(), now);
+        self.current.extra.extend(sample.extra.clone());
+        self.current.provenance.extend(sample.provenance.clone());
+    }
     pub fn set_paused(&mut self, paused: bool) {
         if self.paused != paused {
             // A counter interval crossing either pause boundary is not observed

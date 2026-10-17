@@ -17,7 +17,8 @@ import time
 BIN = Path(os.environ.get('SUNNY_TEST_BINARY', 'target/debug/sunnyfit-ble-cli')).resolve()
 with tempfile.TemporaryDirectory(prefix='sunnyfit-tests-') as temp:
     root = Path(temp)
-    env = dict(os.environ, XDG_CONFIG_HOME=str(root/'config'))
+    env = {k:v for k,v in os.environ.items() if not k.startswith('SUNNY_')}
+    env['XDG_CONFIG_HOME']=str(root/'config')
     env.pop('SUNNY_REDIS_URL', None)
     def run(*args, **kw):
         return subprocess.run([str(BIN), *args], env=env, capture_output=True, text=True, timeout=20, **kw)
@@ -57,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='sunnyfit-tests-') as temp:
     os.close(slave);screen=b'';deadline=time.monotonic()+2
     while time.monotonic()<deadline:
         if select.select([master],[],[],0.1)[0]:screen+=os.read(master,65536)
-    os.write(master,b' mq')
+    os.write(master,b'1234567g89\t\x1b[Z mq')
     stdout,_=p.communicate(timeout=10)
     while select.select([master],[],[],0.1)[0]:
         try:screen+=os.read(master,65536)

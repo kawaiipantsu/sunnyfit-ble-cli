@@ -80,19 +80,12 @@ impl Recorder {
             worker,
         })
     }
-    pub fn record(&mut self, mut row: Value, elapsed_ms: u64) -> Result<Value> {
+    pub fn record(&mut self, row: &Value) -> Result<()> {
         self.sequence += 1;
-        row["schema"] = json!("sunnyfit.event.v1");
-        row["run_id"] = json!(self.run_id);
-        row["sequence"] = json!(self.sequence);
-        row["timestamp_unix_ms"] = json!(unix_ms());
-        row["elapsed_ms"] = json!(elapsed_ms);
-        self.tx
-            .try_send(serde_json::to_string(&row)?)
-            .map_err(|_| {
-                anyhow!("local recorder queue full or writer failed; capture is partial")
-            })?;
-        Ok(row)
+        self.tx.try_send(serde_json::to_string(row)?).map_err(|_| {
+            anyhow!("local recorder queue full or writer failed; capture is partial")
+        })?;
+        Ok(())
     }
     pub fn finish(self, mut summary: Value) -> Result<()> {
         drop(self.tx);

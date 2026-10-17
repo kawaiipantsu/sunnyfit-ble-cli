@@ -1,0 +1,36 @@
+[Unit]
+Description=SunnyFit BLE connector to external storage
+Documentation=https://github.com/kawaiipantsu/sunnyfit-ble-cli
+After=bluetooth.service network-online.target
+Wants=bluetooth.service network-online.target
+
+[Service]
+Type=simple
+User=sunnyfit-ble-cli
+Group=sunnyfit-ble-cli
+StateDirectory=sunnyfit-ble-cli
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/sunnyfit-ble-cli
+Environment=HOME=/var/lib/sunnyfit-ble-cli
+Environment=XDG_CONFIG_HOME=/var/lib/sunnyfit-ble-cli/.config
+EnvironmentFile=-/etc/default/sunnyfit-ble-cli
+ExecStart=/usr/bin/sunnyfit-ble-cli --systemd --config /etc/sunnyfit-ble-cli/config.toml capture
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=75
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sunnyfit-ble-cli /var/log/sunnyfit-ble-cli.log
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

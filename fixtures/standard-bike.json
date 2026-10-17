@@ -1,0 +1,5 @@
+[
+ {"name":"FTMS speed cadence power", "frames":[{"uuid":"00002ad2-0000-1000-8000-00805f9b34fb","hex":"4400d20478005000","expected":{"speed_kmh":12.34,"cadence_rpm":60.0,"power_w":80.0,"heart_rate_bpm":null}}]},
+ {"name":"FTMS truncation", "frames":[{"uuid":"00002ad2-0000-1000-8000-00805f9b34fb","hex":"4400d204","error":true}]},
+ {"name":"CSC crank revolutions", "frames":[{"uuid":"00002a5b-0000-1000-8000-00805f9b34fb","hex":"0200000000","elapsed_ms":0,"expected":{"cadence_rpm":null}},{"uuid":"00002a5b-0000-1000-8000-00805f9b34fb","hex":"0201000004","elapsed_ms":1000,"expected":{"cadence_rpm":60.0}}]}
+]

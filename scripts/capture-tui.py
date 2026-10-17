@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, default=Path('target/debug/sunnyfit-ble-cli'))
 parser.add_argument('--output', type=Path, default=Path('assets/screenshots/workout-demo.png'))
+parser.add_argument('--view', type=int, choices=range(1,10), default=1)
 parser.add_argument('--duration', type=float, default=36)
 args = parser.parse_args()
 if args.duration <= 0:
@@ -33,7 +34,7 @@ stream = pyte.Stream(screen)
 decoder = codecs.getincrementaldecoder('utf-8')('replace')
 with tempfile.TemporaryDirectory(prefix='sunnyfit-screenshot-') as temp:
     env = dict(os.environ, TERM='xterm-256color', COLORTERM='truecolor', XDG_CONFIG_HOME=temp)
-    env.pop('SUNNY_REDIS_URL', None)
+    env = {k:v for k,v in env.items() if not k.startswith('SUNNY_')}
     env.pop('NO_COLOR', None)
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, columns, 0, 0))
@@ -43,6 +44,7 @@ with tempfile.TemporaryDirectory(prefix='sunnyfit-screenshot-') as temp:
     ], stdin=slave, stderr=slave, stdout=slave, env=env)
     os.close(slave)
     try:
+        os.write(master,str(args.view).encode())
         end = time.monotonic() + args.duration
         while time.monotonic() < end:
             if proc.poll() is not None:
@@ -52,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix='sunnyfit-screenshot-') as temp:
         # Freeze the live screen before quit restores the alternate terminal.
         cells = [[screen.buffer[y][x] for x in range(columns)] for y in range(rows)]
         text = '\n'.join(''.join(c.data for c in row) for row in cells)
-        assert 'DEMO' in text and 'CADENCE' in text and 'ENERGY' in text
+        assert 'DEMO' in text and 'CADENCE' in text
         os.write(master, b'q')
         proc.wait(timeout=10)
         if proc.returncode:

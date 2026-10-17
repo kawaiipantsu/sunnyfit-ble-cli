@@ -1,0 +1,15 @@
+# Example for contributors, not a verified hardware profile. No application writes.
+id = "example-bike"
+name = "Example little-endian bike"
+[[fields]]
+characteristic = "12345678-1234-1234-1234-123456789abc"
+metric = "speed_kmh"
+offset = 0
+width = 2
+scale = 0.01
+[[fields]]
+characteristic = "12345678-1234-1234-1234-123456789abc"
+metric = "cadence_rpm"
+offset = 2
+width = 2
+scale = 0.5

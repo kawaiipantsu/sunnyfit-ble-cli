@@ -24,7 +24,7 @@ pub struct Publisher {
 }
 impl Publisher {
     pub fn new(c: &Config) -> Result<Option<Self>> {
-        if !c.redis_enabled {
+        if !c.redis_enabled || !c.sinks.iter().any(|s| s == "redis") {
             return Ok(None);
         }
         let Some(url) = &c.redis_url else {
