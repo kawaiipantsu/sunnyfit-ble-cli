@@ -72,6 +72,8 @@ Try the screen without a bike:
 sunnyfit-ble-cli --demo --workout --met 3
 ```
 
+The cards include km/h + mph, rpm + rps, and km + miles + metres. Speed records
+show window, ride and all-time low/average/max values above a uniform thin outline.
 The TUI renders to stderr; stdout remains available for JSON. Missing or stale
 measurements appear as unavailable. Calories can be device estimates or user-calibrated estimates.
 See the [workout guide](docs/WORKOUT.md) for intervals, ghosts, routes, desk settings and food comparisons.

@@ -279,6 +279,10 @@ pub struct Workout {
     pub paused: bool,
     pub distance_m: Option<f64>,
     pub calories_kcal: Option<f64>,
+    #[serde(default)]
+    pub min_speed_kmh: Option<f64>,
+    #[serde(default)]
+    pub lifetime_speed: Option<crate::lifetime::LifetimeSpeed>,
     pub max_speed_kmh: Option<f64>,
     pub average_speed_kmh: Option<f64>,
     pub current: Sample,
@@ -296,9 +300,9 @@ pub struct Workout {
     distance_baseline: Option<f64>,
     #[serde(skip)]
     calorie_baseline: Option<f64>,
-    #[serde(skip)]
+    #[serde(default)]
     speed_integral: f64,
-    #[serde(skip)]
+    #[serde(default)]
     speed_seconds: f64,
 }
 impl Default for Workout {
@@ -310,6 +314,8 @@ impl Default for Workout {
             paused: false,
             distance_m: None,
             calories_kcal: None,
+            min_speed_kmh: None,
+            lifetime_speed: None,
             max_speed_kmh: None,
             average_speed_kmh: None,
             current: Sample::default(),
@@ -329,6 +335,14 @@ impl Default for Workout {
     }
 }
 impl Workout {
+    pub fn speed_totals(&self) -> crate::lifetime::SpeedTotals {
+        crate::lifetime::SpeedTotals {
+            minimum_kmh: self.min_speed_kmh,
+            maximum_kmh: self.max_speed_kmh,
+            integral: self.speed_integral,
+            observed_s: self.speed_seconds,
+        }
+    }
     /// Apply a service snapshot without importing its elapsed time or cumulative totals.
     pub fn stream_snapshot(
         &mut self,
@@ -339,6 +353,7 @@ impl Workout {
         c: &Config,
     ) {
         self.source = "service".into();
+        self.lifetime_speed = remote.lifetime_speed.clone();
         if self.connection != remote.connection {
             self.connection(&remote.connection);
         }
@@ -406,6 +421,7 @@ impl Workout {
             self.speed_integral += speed * dt;
             self.speed_seconds += dt;
             self.average_speed_kmh = Some(self.speed_integral / self.speed_seconds);
+            self.min_speed_kmh = Some(self.min_speed_kmh.map_or(speed, |v| v.min(speed)));
             self.max_speed_kmh = Some(self.max_speed_kmh.unwrap_or(0.).max(speed));
             if self.distance_baseline.is_none() {
                 *self.distance_m.get_or_insert(0.) += speed / 3.6 * dt;

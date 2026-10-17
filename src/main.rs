@@ -3,6 +3,7 @@ mod config;
 mod database_stats;
 mod export;
 mod food;
+mod lifetime;
 mod live;
 mod metrics;
 mod profiles;
@@ -378,6 +379,16 @@ async fn record(
     } else {
         sinks::Sink::start(&c)?
     };
+    let lifetime_reader = if !attached && !demo && (c.systemd || cli.workout) {
+        sinks::LifetimeReader::start(&c)
+    } else {
+        None
+    };
+    let local_speed_history = if cli.workout && !attached && !demo {
+        Some(lifetime::local_history(&base_dir(&c, config_path)))
+    } else {
+        None
+    };
     let hub = if c.systemd {
         Some(live::Hub::start(&c, &run_id, demo)?)
     } else {
@@ -478,6 +489,11 @@ async fn record(
                 result=&mut worker=>{worker_result=Some(result);break;},
                 _=tick.tick()=>{
                     let ms=start.elapsed().as_millis() as u64;e.workout.tick(ms,&c);
+                    if !attached && !demo {
+                        if let Some(stats)=lifetime_reader.as_ref().and_then(|reader|reader.latest()) {e.workout.lifetime_speed=Some(stats);}
+                        else if let Some(history)=&local_speed_history {let mut totals=history.clone();totals.merge(&e.workout.speed_totals());e.workout.lifetime_speed=Some(lifetime::LifetimeSpeed{source:"local history".into(),totals});}
+                        else {e.workout.lifetime_speed=None;}
+                    }
                     if let Some((sample,time))=&e.external_hr {if ms.saturating_sub(*time)<=c.stale_seconds*1000 {e.workout.external_heart_rate(sample,*time);}}
                     if last_metrics/30<ms/30000 {service::log("storage_health",json!({"databases":e.databases.iter().map(|s|s.stats()).collect::<Vec<_>>(),"redis":e.publisher.as_ref().map(|p|p.stats())}));}
                     if cli.seconds.is_some_and(|s|start.elapsed()>=Duration::from_secs(s)){break;}

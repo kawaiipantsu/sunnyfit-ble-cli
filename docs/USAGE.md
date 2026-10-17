@@ -22,7 +22,7 @@ make                 # list targets
 make build
 make check           # format, Clippy, unit and isolated integration tests
 make deb             # optimized executable and dist/*.deb
-sudo apt install ./dist/sunnyfit-ble-cli_0.4.0-1_amd64.deb
+sudo apt install ./dist/sunnyfit-ble-cli_0.4.1-1_amd64.deb
 ```
 
 The Realtek USB adapter already uses the kernel's `btusb`/`btrtl` drivers. The

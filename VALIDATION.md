@@ -1,8 +1,21 @@
 # Validation record
 
-Checked 2026-10-17 on Debian 13, x86_64. The code is version 0.4.0.
+Checked 2026-10-17 on Debian 13, x86_64. The code is version 0.4.1.
 Private addresses, identities, credentials, raw captures and APK files are not
 included in Git or the Debian package.
+
+## Version 0.4.1 TUI checks
+
+- Rustfmt, Clippy with warnings denied, 33 Rust tests and all three integration
+  suites pass. Speed-history tests cover time-weighted averages, demo exclusion,
+  and reading the database's precomputed lifetime speed statistics.
+- All nine views render at the supported sizes. An actual 64×24 PTY check confirms
+  mph, rps, miles and the window/ride/all-time statistics remain visible.
+- README images were refreshed from the live demo TUI. The outline and min/max
+  guides use lower-line glyphs consistently; secondary units fit in the cards.
+- Lifetime SQL reads run in a separate task and feed the existing service stream.
+  Attached viewers continue to need no database access. Demos never load real
+  history. Missing historical fields remain unknown rather than invented.
 
 ## Version 0.4 checks
 

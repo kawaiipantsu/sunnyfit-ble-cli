@@ -390,6 +390,57 @@ pub async fn events(c: &Config, database: &str, session: &str) -> Result<Vec<Val
     }
     Ok(result)
 }
+/// Read cached lifetime rows in the background; BLE reception never waits for SQL.
+pub struct LifetimeReader {
+    rx: tokio::sync::watch::Receiver<Option<crate::lifetime::LifetimeSpeed>>,
+    task: JoinHandle<()>,
+}
+impl LifetimeReader {
+    pub fn start(c: &Config) -> Option<Self> {
+        let name = if c.sinks.iter().any(|s| s == "mysql") {
+            "mysql"
+        } else if c.sinks.iter().any(|s| s == "sqlite") {
+            "sqlite"
+        } else {
+            return None;
+        };
+        let url = endpoint(c, name).ok()?;
+        let device = format!("bike:{}", c.device.as_deref().unwrap_or("unspecified"));
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let task = tokio::spawn(async move {
+            let mut pool = None;
+            loop {
+                let result=timeout(Duration::from_secs(4),async {
+                    if pool.is_none() {pool=Some(connect(&url).await?);}
+                    let row=sqlx::query("SELECT speed_min_kmh,speed_max_kmh,speed_integral,speed_observed_s FROM `workout-statistics` WHERE scope='lifetime' AND device_id=? AND demo=0")
+                        .bind(&device).fetch_optional(pool.as_ref().unwrap()).await?;
+                    let totals=if let Some(row)=row {crate::lifetime::SpeedTotals {minimum_kmh:row.try_get("speed_min_kmh")?,maximum_kmh:row.try_get("speed_max_kmh")?,integral:row.try_get("speed_integral")?,observed_s:row.try_get("speed_observed_s")?}}else{crate::lifetime::SpeedTotals::default()};
+                    Ok::<_,anyhow::Error>(crate::lifetime::LifetimeSpeed{source:name.into(),totals})
+                }).await;
+                match result {
+                    Ok(Ok(stats)) => {
+                        tx.send_replace(Some(stats));
+                    }
+                    _ => {
+                        pool = None;
+                        tx.send_replace(None);
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        Some(Self { rx, task })
+    }
+    pub fn latest(&self) -> Option<crate::lifetime::LifetimeSpeed> {
+        self.rx.borrow().clone()
+    }
+}
+impl Drop for LifetimeReader {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +488,20 @@ mod tests {
         );
         assert_eq!(row.try_get::<i64, _>("trips_started").unwrap(), 1);
         assert_eq!(row.try_get::<i64, _>("sessions_started").unwrap(), 1);
+        let mut reader = LifetimeReader::start(&Config {
+            sinks: vec!["sqlite".into()],
+            ..c.clone()
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), reader.rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let saved = reader.latest().unwrap();
+        assert_eq!(saved.totals.minimum_kmh, Some(18.));
+        assert_eq!(saved.totals.maximum_kmh, Some(36.));
+        assert_eq!(saved.totals.average(), Some(27.));
+        drop(reader);
         w.current.cadence_rpm = Some(0.);
         w.current.speed_kmh = Some(0.);
         w.elapsed_s = 302.;

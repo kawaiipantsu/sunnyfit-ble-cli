@@ -90,15 +90,19 @@ impl Widget for SpeedGraph<'_> {
         if area.width < 5 || area.height < 3 {
             return;
         }
-        let valid: Vec<f64> = self.values.iter().flatten().copied().collect();
+        let visible = self
+            .values
+            .iter()
+            .skip(self.values.len().saturating_sub(area.width as usize));
+        let valid: Vec<f64> = visible.flatten().copied().collect();
         let max = valid.iter().copied().reduce(f64::max).unwrap_or(0.);
         let min = valid.iter().copied().reduce(f64::min).unwrap_or(0.);
         let top = (max * 1.18).max(10.);
         let h = area.height - 1;
         for value in [min, max] {
-            let y = area.bottom() - 1 - (value / top * h as f64).round() as u16;
-            for x in area.x..area.right() {
-                b[(x, y)].set_symbol("┄").set_fg(Color::Rgb(40, 65, 79));
+            let y = area.bottom() - 1 - (value / top * h as f64).floor() as u16;
+            for x in (area.x..area.right()).step_by(2) {
+                b[(x, y)].set_symbol("▁").set_fg(Color::Rgb(40, 65, 79));
             }
         }
         let width = area.width as usize;
@@ -118,16 +122,8 @@ impl Widget for SpeedGraph<'_> {
                     (60. + t * 100.) as u8,
                 ));
             }
-            b[(x, y)]
-                .set_symbol(if level.fract() > 0.5 { "▀" } else { "▁" })
-                .set_fg(TEAL);
+            b[(x, y)].set_symbol("▁").set_fg(TEAL);
         }
-        b.set_string(
-            area.x + 1,
-            area.y,
-            format!("MAX {max:.1}  ·  MIN {min:.1} km/h"),
-            Style::default().fg(GOLD),
-        );
     }
 }
 impl Ui {
@@ -228,7 +224,7 @@ fn draw(
     let rows = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
-        Constraint::Length(4),
+        Constraint::Length(5),
         Constraint::Min(8),
         Constraint::Length(3),
         Constraint::Length(2),
@@ -277,47 +273,139 @@ fn draw(
         rows[1],
     );
     let cards = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(rows[2]);
-    for (i, (name, value)) in [
-        ("SPEED", metric(w.current.speed_kmh, "km/h")),
-        ("CADENCE", metric(w.current.cadence_rpm, "rpm")),
-        ("DISTANCE", metric(w.distance_m.map(|d| d / 1000.), "km")),
-        ("HEART RATE", metric(w.current.heart_rate_bpm, "bpm")),
+    for (i, (name, lines)) in [
+        (
+            "SPEED",
+            vec![
+                metric(w.current.speed_kmh, "km/h"),
+                metric(w.current.speed_kmh.map(|v| v / 1.609344), "mph"),
+            ],
+        ),
+        (
+            "CADENCE",
+            vec![
+                metric(w.current.cadence_rpm, "rpm"),
+                metric(w.current.cadence_rpm.map(|v| v / 60.), "rps"),
+            ],
+        ),
+        (
+            "DISTANCE",
+            vec![
+                metric(w.distance_m.map(|v| v / 1000.), "km"),
+                metric(w.distance_m.map(|v| v / 1609.344), "mi"),
+                metric(w.distance_m, "m"),
+            ],
+        ),
+        ("HEART RATE", vec![metric(w.current.heart_rate_bpm, "bpm")]),
     ]
-    .iter()
+    .into_iter()
     .enumerate()
     {
-        f.render_widget(
-            Paragraph::new(format!(" {value}"))
-                .style(
-                    Style::default()
-                        .fg(if i == 3 {
-                            Color::Rgb(255, 136, 157)
-                        } else {
-                            TEAL
-                        })
-                        .add_modifier(Modifier::BOLD),
+        let color = if i == 3 {
+            Color::Rgb(255, 136, 157)
+        } else {
+            TEAL
+        };
+        let lines = lines
+            .into_iter()
+            .enumerate()
+            .map(|(line, value)| {
+                Line::styled(
+                    format!(" {value}"),
+                    if line == 0 {
+                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(DIM)
+                    },
                 )
-                .block(panel(*name)),
-            cards[i],
-        );
+            })
+            .collect::<Vec<_>>();
+        f.render_widget(Paragraph::new(lines).block(panel(name)), cards[i]);
     }
     match tab {
         0 => {
             let cols = Layout::horizontal([Constraint::Percentage(67), Constraint::Percentage(33)])
                 .split(rows[3]);
-            let block = panel("SPEED · last 240 seconds · gaps stay empty");
+            let visible = history.len().min(cols[0].width.saturating_sub(2) as usize);
+            let block = panel(format!("SPEED · last {visible}s · km/h"));
             let inner = block.inner(cols[0]);
             f.render_widget(block, cols[0]);
-            f.render_widget(SpeedGraph { values: history }, inner);
+            let sections =
+                Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).split(inner);
+            let values = history
+                .iter()
+                .skip(history.len().saturating_sub(visible))
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let window_min = values.iter().copied().reduce(f64::min);
+            let window_max = values.iter().copied().reduce(f64::max);
+            let window_avg =
+                (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64);
+            let lifetime = w.lifetime_speed.as_ref().map(|l| &l.totals);
+            let number =
+                |v: Option<f64>| v.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into());
+            let stat_line = |label: &str, min, avg, max, color| {
+                Line::styled(
+                    format!(
+                        " {label:<9}{:>7}{:>7}{:>7}",
+                        number(min),
+                        number(avg),
+                        number(max)
+                    ),
+                    Style::default().fg(color),
+                )
+            };
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::styled(
+                        format!(" {:<9}{:>7}{:>7}{:>7}", "km/h", "LOW", "AVG", "MAX"),
+                        Style::default().fg(DIM),
+                    ),
+                    stat_line("WINDOW", window_min, window_avg, window_max, TEAL),
+                    stat_line(
+                        "RIDE",
+                        w.min_speed_kmh,
+                        w.average_speed_kmh,
+                        w.max_speed_kmh,
+                        Color::Rgb(215, 230, 240),
+                    ),
+                    stat_line(
+                        "ALL-TIME",
+                        lifetime.and_then(|l| l.minimum_kmh),
+                        lifetime.and_then(|l| l.average()),
+                        lifetime.and_then(|l| l.maximum_kmh),
+                        GOLD,
+                    ),
+                ]),
+                sections[0],
+            );
+            f.render_widget(SpeedGraph { values: history }, sections[1]);
             let text = vec![
                 Line::styled(
                     format!(" ACTIVE  {}", clock(w.active_s)),
                     Style::default().fg(TEAL),
                 ),
                 Line::raw(format!(" ENERGY  {}", metric(w.calories_kcal, "kcal"))),
-                Line::raw(format!(" AVERAGE {}", metric(w.average_speed_kmh, "km/h"))),
-                Line::raw(format!(" PEAK    {}", metric(w.max_speed_kmh, "km/h"))),
+                Line::raw(format!(
+                    " RIDE AVG {}",
+                    metric(w.average_speed_kmh.map(|v| v / 1.609344), "mph")
+                )),
                 Line::raw(format!(" POWER   {}", metric(w.current.power_w, "W"))),
+                Line::styled(
+                    format!(
+                        " All-time: {}",
+                        if demo {
+                            "demo excluded"
+                        } else {
+                            w.lifetime_speed
+                                .as_ref()
+                                .map(|v| v.source.as_str())
+                                .unwrap_or("unavailable")
+                        }
+                    ),
+                    Style::default().fg(DIM),
+                ),
                 Line::raw(""),
                 Line::styled(
                     crate::food::message(w.calories_kcal),
@@ -340,7 +428,11 @@ fn draw(
                 parts[0],
                 "SPEED · scale 50 km/h",
                 w.current.speed_kmh.unwrap_or(0.) / 50.,
-                metric(w.current.speed_kmh, "km/h"),
+                format!(
+                    "{} · {}",
+                    metric(w.current.speed_kmh, "km/h"),
+                    metric(w.current.speed_kmh.map(|v| v / 1.609344), "mph")
+                ),
                 TEAL,
             );
             gauge(
@@ -349,8 +441,9 @@ fn draw(
                 "CADENCE · comfortable target",
                 w.current.cadence_rpm.unwrap_or(0.) / (c.target_cadence * 1.5),
                 format!(
-                    "{}  / target {:.0} rpm",
+                    "{} · {} / target {:.0} rpm",
                     metric(w.current.cadence_rpm, "rpm"),
+                    metric(w.current.cadence_rpm.map(|v| v / 60.), "rps"),
                     c.target_cadence
                 ),
                 GOLD,

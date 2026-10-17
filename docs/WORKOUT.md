@@ -36,6 +36,27 @@ the bike; Enter pauses it and `r` resets it in Desk view. Desktop notifications
 are opt-in with `--notifications` and require `notify-send` / a desktop session.
 The same messages are visible in the TUI without a notification daemon.
 
+## Units and speed records
+
+The cards show speed in km/h and mph, cadence in rpm and revolutions per second
+(rps), and distance in kilometres, miles and metres. The graph uses a uniform
+lower-line `▁` outline over its gradient fill.
+
+The speed table separates the visible **WINDOW**, the entire **RIDE**, and
+**ALL-TIME** low/average/max values. The visible window includes fresh zero-speed
+samples; ride and all-time statistics cover measured active time. Averages for
+rides and lifetime records are weighted by time, not by the number of workouts.
+
+When sharing the service, all-time records come from its selected bike's stored
+MySQL or SQLite lifetime row. The collector refreshes this read-only cache about
+every five seconds and includes it in the local stream; viewers need no database
+credentials. Standalone workouts use database records when configured, otherwise
+saved local workouts plus the current ride. Local history includes available
+measurements across saved rides; old summaries without speed-time weights or
+minimums contribute only the fields actually recorded. Version 0.4 captures can
+recover their weights/minima from recorded statistics. Demo workouts never load
+or contribute to real all-time records. Unavailable values appear as `—`.
+
 ## Intervals
 
 `--interval-plan workouts/desk-intervals.toml` loads a validated TOML plan. Without
